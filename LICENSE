@@ -1,0 +1,86 @@
+CLOUDTANK
+Copyright (c) 2026 Windnoise. All rights reserved.
+
+PROPRIETARY LICENCE — SOURCE-AVAILABLE, NOT OPEN SOURCE
+
+This app and everything shipped with it — the code, the shaders, the pictures,
+the text and the layout — is the property of Windnoise and is protected by
+copyright law, except the third-party material named in section 5. The app is
+published so that it can be used and read. It is not published for reuse.
+
+
+1. WHAT YOU MAY DO
+
+   a. Use the app at its published address, https://cloudtank.windnoise.org/
+   b. Read the source code for personal study.
+
+
+2. WHAT YOU MAY NOT DO
+
+   Without prior written permission from the copyright holder, you may not:
+
+   a. copy, reproduce or store the app or any part of it, except for the
+      transient copy your browser makes in order to run it;
+   b. modify, adapt, translate or create derivative works from it;
+   c. distribute, publish, host, mirror, sublicense, rent, lease, lend or sell
+      it, or make it available to any third party;
+   d. use it or any part of it in another work, product or service, commercial
+      or otherwise;
+   e. use it, or any data derived from it, as training material for any machine
+      learning model, dataset or automated system;
+   f. remove, obscure or alter any copyright notice, credit or attribution
+      contained in it;
+   g. claim authorship of it, present it as your own work, or represent yourself
+      as its author or originator, in whole or in part.
+
+   No rights are granted by implication, estoppel or otherwise. Every right not
+   expressly granted in section 1 is reserved.
+
+   Hosting this repository publicly on GitHub lets other GitHub users view it
+   and fork it within GitHub, because GitHub's Terms of Service require that of
+   public repositories. That grants none of the rights withheld above: a fork
+   gives no permission to use, modify, publish or redistribute the app.
+
+
+3. NO WARRANTY
+
+   THE APP IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+   IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+   CONNECTION WITH THE APP OR THE USE OR OTHER DEALINGS IN THE APP.
+
+   Cloudtank is a visual simulation. What it shows is not a measurement, and
+   nothing in it should be relied on for engineering, safety or any real
+   decision about water, smoke, air or the objects in them.
+
+
+4. YOUR DATA
+
+   Your scenes, your settings and the models you import are kept in the browser
+   you use, on that computer, and are never sent anywhere. The scene files you
+   save, the models you bring and the pictures you make are yours.
+
+
+5. THIRD-PARTY MATERIAL (not covered by this licence)
+
+   The name's typeface, fonts/fredoka-600-cloudtank.woff2, is Fredoka
+   (Copyright 2016 The Fredoka Project Authors), cut down to the letters of
+   the name. It is licensed under the SIL Open Font License, Version 1.1, whose
+   full text ships beside it as fonts/OFL.txt. This licence claims no rights
+   over it; its own licence applies to it.
+
+   The typeface Inter (SIL Open Font License 1.1) is loaded by the page from
+   Google Fonts. It is not part of the app and keeps its own licence.
+
+   Houdini is a trademark of Side Effects Software Inc., and Blender of the
+   Blender Foundation. The app names them only to say which methods its
+   simulation follows; Cloudtank is not affiliated with, nor endorsed by,
+   either of them.
+
+
+6. PERMISSION
+
+   Requests to do anything section 2 forbids should be made in writing to the
+   copyright holder at windnoise.org.

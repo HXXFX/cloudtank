@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cloudtank</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">
+<link rel="preload" href="fonts/fredoka-600-cloudtank.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<canvas id="view" tabindex="0" aria-label="3D view"></canvas>
+<canvas id="gizmo" aria-hidden="true"></canvas>
+
+<header class="glass top" id="top"></header>
+<nav class="glass tools" id="tools" aria-label="Tools"></nav>
+<div class="glass flyout" id="flyout" hidden></div>
+<div class="glass more" id="more" role="menu" aria-label="More" hidden></div>
+<div class="glass more ctx" id="ctx" role="menu" aria-label="Actions" hidden></div>
+<aside class="glass panel" id="panel" aria-label="Settings">
+  <div class="tabs" id="tabs" role="tablist"></div>
+  <div class="body" id="body"></div>
+</aside>
+<div class="glass status" id="status"></div>
+<svg class="compass" id="compass" viewBox="-38 -38 76 76" hidden></svg>
+<div class="hint" id="hint">Drag: turn the view · Right-drag: slide the view · Wheel: zoom · Click a thing, then drag its handles: W move, E turn, R size</div>
+<div class="toast" id="toast" hidden></div>
+<div class="dialog" id="info" hidden></div>
+<div class="drop" id="drop" hidden>Drop a model file to add it (.glb, .gltf, .obj, .stl)</div>
+<input type="file" id="model-file" accept=".glb,.gltf,.obj,.stl,.bin" multiple hidden>
+<input type="file" id="scene-file" accept=".cloudtank,.fluidsim,.json" hidden>
+<input type="file" id="image-file" accept="image/*" hidden>
+<div class="loading" id="loading"><div>Preparing the graphics card…</div><div class="bar"><i></i></div><div class="err" id="loading-err"></div></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
