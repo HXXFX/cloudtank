@@ -248,6 +248,8 @@ export class Viewport {
     if (this.smoke) this.smoke.reset();
     if (this.flip) this.flip.reset();
     if (this.config.refill) this.config.refill(this);
+    this.fluidRun = (this.fluidRun || 0) + 1;
+    if (this.physics) this.physics.setWater(null);
     this.simTime = 0;
     this.simFrames = 0;
   }
@@ -728,7 +730,8 @@ export class Viewport {
     if (probe) this.readProbe(probe);
     if (this.flip) {
       const pr = this.flip.readWater();
-      if (pr) pr.then(w => { if (w) this.physics.setWater(w); });
+      const run = this.fluidRun;
+      if (pr) pr.then(w => { if (w && run === this.fluidRun) this.physics.setWater(w); });
     } else this.physics.setWater(null);
   }
 

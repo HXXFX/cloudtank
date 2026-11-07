@@ -1,116 +1,43 @@
-import { defaultLook, LIGHT_PRESETS, BACKGROUNDS, copy } from './engine/environment.js';
-import { defaults, hexToRgb } from './engine/settings.js';
-import { makeMark } from './engine/marks.js';
-import { MOVES_BY_DEFAULT } from './engine/physics.js';
 import { ASSET_BY_ID } from './engine/assets.js';
-import { SHAPES } from './engine/shapes.js';
 
-export const STRIP = 2;
-export const START_REGION = { size: [4.4, 1.3, 1.5], center: [0.2, -0.25] };
-export const START_FINENESS = { smoke: 0.06, liquid: 0.04 };
-export const START_CAMERA = { target: [0.82, 0.15, -1.05], distance: 12.2, yaw: 0.28, pitch: 0.66, fov: 30 };
-
-const WHITE = '#efeee9', TILE = '#e2e1dc', GLASS = '#d6f3f7';
-export const START_PAIR = { water: ['#d9262e', '#2a56d6'], smoke: ['#ff4a4a', '#3d6dff'], names: ['Red', 'Blue'] };
-
-export function startLook() {
-  const look = defaultLook();
-  look.light = { preset: 'softStudio', ...copy(LIGHT_PRESETS.softStudio) };
-  look.background = { preset: 'solid', ...copy(BACKGROUNDS.solid), top: '#e9e8e4', bottom: '#e9e8e4', haze: 0.2, image: null };
-  look.ground = { color: '#ecebe7', finish: 'satin', grid: true, gridColor: '#bdbcb5', gridSpacing: 0.1, gridStrength: 0.35 };
-  look.wind = { on: true, dir: 90, speed: 1, gusts: 0.1, turbulence: 0.5 };
-  look.post = null;
-  return look;
-}
-
-export function startSettings() {
-  return { ...defaults(), liquidColor: '#2a8de8', clarity: 0.45, splash: 0.9, look: 'smooth',
-    smokeColor: '#f2f2f0', smokeOpacity: 5, smokeAmount: 1.1, rise: 0.4, swirl: 0.5, fade: 0.85 };
-}
-
-export function testStrip(v, o = {}) {
-  const k = o.scale || 1, fast = Math.sqrt(k);
-  const put = (shape, name, pos, size, color, extra = {}) => {
-    const b = v.scene.addObject({ shape, name, pos, size, color: hexToRgb(color), finish: extra.finish || 'matte', ...extra });
-    b.home = { pos: [...b.pos], rot: [...b.rot] };
-    return b;
-  };
-  const glass = { finish: 'glass' }, h = (o.wall || 0.06) * k, t = (o.thick || 0.01) * k;
-  put('box', 'Strip wall', [0, h, -0.16 * k], [0.77 * k, h, t], GLASS, glass);
-  put('box', 'Strip wall', [0, h, 0.16 * k], [0.77 * k, h, t], GLASS, glass);
-  put('box', 'Strip wall', [-0.76 * k, h, 0], [t, h, 0.15 * k], GLASS, glass);
-  put('box', 'Strip wall', [0.76 * k, h, 0], [t, h, 0.15 * k], GLASS, glass);
-  const gaps = o.oneEnd ? [[-0.45, true], [-0.15, false], [0.15, true], [0.45, false]] : [[-0.45, true], [-0.15, false], [0.15, false], [0.45, true]];
-  for (const [x, front] of gaps) {
-    const z0 = front ? -0.15 : -0.06, z1 = front ? 0.06 : 0.15;
-    put('box', 'Partition', [x * k, h, (z0 + z1) / 2 * k], [t, h, (z1 - z0) / 2 * k], GLASS, glass);
-  }
-  const P = o.pair || START_PAIR, top = (o.top || 0.4) * k;
-  const towers = o.oneEnd ? [[-0.9, 0.08, P.water[0], P.names[0]], [-0.9, -0.08, P.water[1], P.names[1]]]
-    : [[-0.9, 0, P.water[0], P.names[0]], [0.9, 0, P.water[1], P.names[1]]];
-  const RIM = 0.062 * k, OUTLET = top + 0.08 * k, half = 0.05 * k;
-  for (const [x, z, color, name] of towers) {
-    const s = Math.sign(x), fx = s * 0.708 * k, tx = fx + s * (RIM + half + 0.002 * k);
-    const funnel = v.addAsset('pour', [fx, 0, z * k], { lift: OUTLET, scale: k / (o.funnelMade || 1) });
-    const rim = funnel.object.pos[1] + funnel.object.size[1];
-    put('column', name + ' tower', [tx, rim / 2, z * k], [half, rim / 2, half], WHITE, { finish: 'gloss' });
-    Object.assign(funnel.sources[0], { name: name + ' pour', radius: 0.03 * k, speed: (o.pourSpeed || 1.0) * fast, rate: o.pourRate || 1.0, color: hexToRgb(color) });
-  }
-  v.scene.addEmitter({ type: 'liquid', sink: true, name: 'Drain', pos: [(o.oneEnd ? 0.6 : 0) * k, -0.2 * k, 0], radius: 0.27 * k, rate: o.drain || 6, dir: [0, 1, 0], speed: 0, color: [0.2, 0.21, 0.23] });
-  if (o.smoke === 'column') for (const [x, color, name] of [[-0.08, P.smoke[0], P.names[0] + ' smoke'], [0.08, P.smoke[1], P.names[1] + ' smoke']])
-    v.scene.addEmitter({ type: 'smoke', name, pos: [x * k, 0.3 * k, -0.05 * k], radius: 0.08 * k, dir: [-Math.sign(x) * 0.08, 1, 0], speed: 0.8 * fast, rate: 0.7, heat: 0.8, color: hexToRgb(color) });
-  else if (o.smoke !== false) for (const [z, color, name] of [[0.06, P.smoke[0], P.names[0] + ' smoke'], [-0.06, P.smoke[1], P.names[1] + ' smoke']])
-    v.scene.addEmitter({ type: 'smoke', name, pos: [-0.68 * k, 0.3 * k, (z - 0.32) * k], radius: 0.07 * k, dir: [1, 0, -Math.sign(z) * 0.06], speed: 0.6 * fast, rate: o.smokeRate || 1.2, heat: 0.15, color: hexToRgb(color) });
-}
-
-export function catalogue(v, items, o = {}) {
-  const tile = o.tile || 0.26, made = [], tiles = o.tiles ?? !!o.display, base = tiles ? 0.008 : 0;
-  const keep = b => { b.home = { pos: [...b.pos], rot: [...b.rot] }; return b; };
-  let n = o.from || 1;
-  for (const [kind, id, x, z, f = {}] of items) {
-    if (tiles) keep(v.scene.addObject({ shape: 'box', name: 'Tile', pos: [x, 0.004, z], size: [tile / 2, 0.004, tile / 2],
-      color: hexToRgb(TILE), finish: 'matte', collides: !o.display }));
-    let thing = null;
-    if (kind === 'shape') {
-      const sz = f.size || SHAPES[id].size, weight = !o.display && MOVES_BY_DEFAULT.has(id);
-      thing = keep(v.scene.addObject({ shape: id, name: f.name, pos: [x, (f.lift || 0) + sz[1] + base, z], size: sz, rot: f.rot || [0, 0, 0],
-        color: hexToRgb(f.color || WHITE), finish: f.finish || null, collides: o.collides,
-        moves: weight && !f.weightInBox, whenInBox: weight && f.weightInBox ? { moves: true } : null,
-        material: !o.display && id === 'ball' ? 'rubber' : 'wood' }));
-      v.dropToGround(thing, base + (f.lift || 0)); thing.home.pos = [...thing.pos];
-    } else {
-      const r = v.addAsset(id, [x, 0, z], { on: base, lift: (f.lift ?? 0) + base, scale: f.scale, color: f.color || WHITE });
-      if (!r) continue;
-      thing = r.object;
-      if (f.rot) { thing.rot = f.rot; v.dropToGround(thing, base + (f.lift || 0)); thing.home = { pos: [...thing.pos], rot: [...thing.rot] }; }
-      if (o.collides === false) thing.collides = false;
-      if (o.display) thing.moves = false;
-      thing.finish = f.finish || null;
-      for (const e of r.sources) v.scene.remove(e);
-      if (r.sources.length && !o.display) thing.whenInBox = { parts: true };
-    }
-    made.push(thing);
-    if (o.labels) v.scene.addMark(makeMark('label', { target: thing.id, text: `${String(n).padStart(2, '0')} ${f.label || id.replace('-', ' ')}`.toUpperCase(),
-      style: 'tag', bg: '', color: '#8a8880', size: 10, dx: -24, dy: 34 }));
-    n++;
-  }
-  return made;
-}
-
-const FINISH = { matte: '#efeee9', gloss: '#efeee9', metal: '#c4c8cd', glass: '#e8f2f4' };
-function spaced(pieces, z, gap) {
-  let x = -(pieces.reduce((a, p) => a + p.w, 0) + gap * (pieces.length - 1)) / 2;
-  return pieces.map(p => { const at = x + p.w / 2; x += p.w + gap; return [p.kind, p.id, at, z, p.f]; });
-}
-const shapePiece = (id, i) => {
-  const finish = ['matte', 'gloss', 'metal', 'glass'][i % 4];
-  return { kind: 'shape', id, w: SHAPES[id].size[0] * 2, f: { finish, color: FINISH[finish],
-    rot: id === 'ring' ? [Math.PI / 2, 0, 0] : [0, 0, 0], weightInBox: id === 'ring' } };
+const START = {
+  format: "fluidsim-scene",
+  version: 1,
+  kits: 2,
+  frosted: 1,
+  camera: {"target": [1.2910760774523513, 0.2504245528697503, 0.9162444057371911], "distance": 4.308524982525303, "yaw": 0.32320098876952935, "pitch": 0.3996000366210937, "fov": 0.5235987755982988},
+  settings: {"speed": 1, "smokeAmount": 1.1, "smokeOpacity": 5, "rise": 0.4, "swirl": 0.5, "fade": 0.85, "smokeDetail": 1, "smokeColor": "#f2f2f0", "cooling": 0.5, "smokeWeight": 0.3, "smokeSteps": 30, "flow": 0.3, "splash": 0.29, "clarity": 0.82, "foam": 1, "caustics": 1, "liquidColor": "#2a8de8", "liquidSteps": 70, "look": "smooth", "objectColor": "#c9c4bb", "gravity": 9.81},
+  look: {"light": {"preset": "none", "label": "None: your lights only", "key": {"az": 120, "el": 50, "color": "#ffffff", "power": 0, "soft": 2}, "fill": {"az": 0, "el": 0, "color": "#ffffff", "power": 0}, "rim": {"az": 0, "el": 0, "color": "#ffffff", "power": 0}, "ambSky": "#000000", "ambGround": "#000000", "ambPower": 0, "exposure": 1}, "background": {"preset": "black", "label": "Black", "kind": 5, "top": "#000000", "bottom": "#000000", "haze": 0, "image": null}, "ground": {"color": "#ecebe7", "finish": "satin", "grid": true, "gridColor": "#bdbcb5", "gridSpacing": 0.1, "gridStrength": 0.35}, "weather": {"rain": 0}, "wind": {"on": false, "dir": 90, "speed": 1, "gusts": 0.1, "turbulence": 0.5}, "post": {"film": "true", "bloom": 0.25, "bloomFrom": 0.45, "bloomSpread": 0.55, "bloomTint": "#ffffff", "veil": 0.02, "softHigh": 0.2, "diffusion": "mist", "preset": "custom", "tint": "#eae68b", "tintAmount": 0.12, "posterize": 0, "band": null, "soften": 0, "split": 0.1, "ink": 0}},
+  region: {"size": [5.83, 1.68, 6.95], "center": [0.913, 0.905]},
+  fineness: {"smoke": 0.041666666666666664, "liquid": 0.05},
+  objects: [
+    {"id": 169, "kind": "object", "shape": "model", "name": "Clear basin 1", "pos": [0.7111447447065374, 0.2216997645591959, 0.8066421207646832], "size": [0.5, 0.07000000029802322, 0.3499999940395355], "rot": [0, 0, 3.141592653589793], "color": [0.8392156862745098, 0.9529411764705882, 0.9686274509803922], "model": "asset:tray", "moves": false, "collides": true, "material": "wood", "home": {"pos": [0.7111447447065374, 0.2216997645591959, 0.8066421207646832], "rot": [0, 0, 3.141592653589793]}, "finish": "glass", "motion": {"travel": "none", "dir": 90, "speed": 0.3, "distance": 4, "spin": 0, "bob": 0}, "asset": "tray"},
+    {"id": 173, "kind": "object", "shape": "ball", "name": "Ball 1", "pos": [0.4161702752379331, 0.06450879511669938, 1.4072880421088265], "size": [0.06420001216501686, 0.06468783537566195, 0.06468783537566195], "rot": [0.8365709739976347, 3.0472611305322297, -0.9621277797548548], "color": [0.788235294117647, 0.7686274509803922, 0.7333333333333333], "model": null, "moves": true, "collides": true, "material": "rubber", "home": {"pos": [0.4161702752379331, 0.06450879511669938, 1.4072880421088265], "rot": [0.8365709739976347, 3.0472611305322297, -0.9621277797548548]}, "finish": "frosted", "motion": {"travel": "none", "dir": 90, "speed": 0.3, "distance": 4, "spin": 0, "bob": 0}, "asset": null, "pbr": {"depth": 0.36, "ior": 1.7, "rough": 0.51}},
+    {"id": 175, "kind": "object", "shape": "model", "name": "Floor drain 1", "pos": [0.21350197450379094, 0.004999999888241291, 1.1887227498513409], "size": [0.18000000715255737, 0.004999999888241291, 0.18000000715255737], "rot": [0, 0, 0], "color": [0.6039215686274509, 0.6274509803921569, 0.6588235294117647], "model": "asset:floor-drain@2", "moves": false, "collides": false, "material": "wood", "home": {"pos": [0.21350197450379094, 0.004999999888241291, 1.1887227498513409], "rot": [0, 0, 0]}, "finish": "glass", "motion": {"travel": "none", "dir": 90, "speed": 0.3, "distance": 4, "spin": 0, "bob": 0}, "asset": "floor-drain"},
+  ],
+  emitters: [
+    {"id": 171, "kind": "emitter", "type": "smoke", "name": "Smoke source 1", "pos": [0.6967813226216686, 0.11281856765998806, 0.777793413698493], "radius": 0.24, "color": [1, 0.8, 0.9450980392156862], "dir": [0, 1, 0], "speed": 0.6, "rate": 1, "heat": 1, "on": true, "pulse": null},
+    {"id": 172, "kind": "emitter", "type": "smoke", "name": "Smoke source 1 copy", "pos": [1.093609668310024, 0.11281856765998806, 1.00198383082932], "radius": 0.24, "color": [0.9529411764705882, 0.9529411764705882, 0.6470588235294118], "dir": [0, 1, 0], "speed": 0.6, "rate": 1, "heat": 1, "on": true, "pulse": null},
+    {"id": 174, "kind": "emitter", "type": "liquid", "name": "Liquid source 1", "pos": [0.43601068967306267, 0.5404778333093461, 0.9178198922568873], "radius": 0.04, "color": [0.24705882352941178, 0.592156862745098, 0.9137254901960784], "dir": [0, -1, 0], "speed": 2.2, "rate": 1.25, "heat": 1, "on": true, "pulse": null},
+    {"id": 176, "kind": "emitter", "type": "liquid", "name": "Floor drain intake", "pos": [0.21350197450379094, 0.03, 1.1887227498513409], "radius": 0.15, "color": [0.16470588235294117, 0.17647058823529413, 0.2], "dir": [0, 1, 0], "speed": 0, "rate": 1, "heat": 1, "on": true, "pulse": null, "sink": true, "attach": {"to": 175, "part": 0}},
+    {"id": 177, "kind": "emitter", "type": "liquid", "name": "Liquid source 2", "pos": [0.9779796595177171, 0.545748257877824, 0.8964523458399306], "radius": 0.14, "color": [0.7843137254901961, 0.9607843137254902, 0.7215686274509804], "dir": [0, -1, 0], "speed": 0.7, "rate": 0.2, "heat": 1, "on": true, "pulse": null},
+  ],
+  lights: [
+    {"id": 170, "kind": "light", "type": "area", "name": "Area light 1", "pos": [0.7474911976713045, 1.585984237950735, 0.9381346699009857], "dir": [0, -1, 0], "color": [1, 1, 1], "power": 6, "radius": 0.4, "aspect": 0.6, "angle": 40, "soft": 0.3, "shadows": true, "show": true, "on": true},
+  ],
+  marks: [],
+  models: [
+    {"id": "asset:tray", "name": "Clear basin", "asset": "tray", "design": 1},
+    {"id": "asset:floor-drain@2", "name": "Floor drain", "asset": "floor-drain", "design": 2},
+  ],
+  images: [],
+  image: null,
+  imageName: null,
 };
-export const shapeRows = (z1, z2, gap) => [...spaced(['box', 'ball', 'column', 'cone'].map(shapePiece), z1, gap), ...spaced(['ring', 'ramp', 'arch', 'stairs'].map((id, i) => shapePiece(id, i + 4)), z2, gap)];
-export const toolRow = (z, gap) => spaced([['blower', 0.24, 'fan', 'gloss'], ['hood', 0.3, null, 'metal'], ['floor-drain', 0.36, 'drain', 'metal'], ['spring', 0.11, null, 'metal'],
-  ['metal-block', 0.18, 'block', 'metal'], ['frosted-ball', 0.14, 'ball', 'frosted'], ['tree', 0.28, null, 'matte'], ['fence', 0.92, null, 'gloss']]
-  .map(([id, w, label, finish]) => ({ kind: 'asset', id, w, f: { label: label || id, finish, color: finish === 'metal' ? '#b9bdc2' : finish === 'glass' || finish === 'frosted' ? '#eef5f6' : '#efeee9' } })), z, gap);
+
+export const startScene = () => JSON.parse(JSON.stringify(START));
+
+export const START_CAMERA = { target: [1.2910760774523513, 0.2504245528697503, 0.9162444057371911], distance: 4.308524982525303, yaw: 0.32320098876952935, pitch: 0.3996000366210937, fov: 30 };
 
 export function wakeOldKits(scene) {
   let n = 0;
@@ -144,10 +71,4 @@ export function clearOldTiles(v) {
     } else o.pos[1] = y0;
   }
   return { tiles: tiles.length, setDown };
-}
-
-export function buildStartScene(v) {
-  testStrip(v, { oneEnd: true, drain: 4, pourRate: 0.35, wall: 0.07, thick: 0.015, pair: START_PAIR, scale: STRIP, funnelMade: 2, smokeRate: 0.85 });
-  catalogue(v, shapeRows(-1.5, -3.2, 0.3));
-  catalogue(v, toolRow(1.5, 0.3));
 }

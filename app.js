@@ -16,7 +16,7 @@ import { icon } from './ui/icons.js';
 import { TABS, scenePanel, fluidsPanel, windPanel, lightPanel, worldPanel, filtersPanel, dropToGround } from './ui/panels.js';
 import { History } from './history.js';
 import { openScene, downloadScene, autosaveWrite, autosaveRead, autosaveClear, setImage, averageColours, FILE_EXT } from './store.js';
-import { buildStartScene, startLook, startSettings, START_REGION, START_FINENESS, START_CAMERA } from './start-scene.js';
+import { startScene, START_CAMERA } from './start-scene.js';
 import { Glass } from './glass.js';
 import { Liquid, MATERIALS } from './liquid.js';
 import * as LookTune from './look-tune.js';
@@ -46,27 +46,23 @@ systemDark.addEventListener('change', () => { if (app.themeMode === 'system') ap
 async function boot() {
   const sceneParam = PARAMS.get('scene');
   app.noSave = !!sceneParam;
-  const saved = sceneParam === 'start' ? null : sceneParam ? await fetch(sceneParam).then(r => r.json()) : await autosaveRead();
+  const saved = sceneParam === 'start' ? startScene() : sceneParam ? await fetch(sceneParam).then(r => r.json()) : (await autosaveRead()) || startScene();
   const vp = new Viewport($('view'), {
     overlay: $('gizmo'),
     rightDrag: 'pan',
-    region: saved && saved.region ? saved.region : saved ? undefined : START_REGION,
-    fineness: saved && saved.fineness ? saved.fineness : saved ? undefined : START_FINENESS,
-    area: saved && !saved.region ? saved.area : undefined,
-    detail: saved && !saved.region ? saved.detail : undefined,
-    look: saved ? saved.look : startLook(),
-    settings: saved ? undefined : startSettings(),
-    build: saved ? null : buildStartScene,
+    region: saved.region,
+    fineness: saved.fineness,
+    area: saved.region ? undefined : saved.area,
+    detail: saved.region ? undefined : saved.detail,
+    look: saved.look,
     camera: { ...START_CAMERA },
   });
   app.vp = vp;
   vp.display.box = false;
   try {
     await vp.init();
-    if (saved) {
-      try { await openScene(vp, saved); }
-      catch (e) { console.error(e); vp.populate(); buildStartScene(vp); toast('The last scene could not be opened, so a new one was started: ' + e.message, true); }
-    }
+    try { await openScene(vp, saved); }
+    catch (e) { console.error(e); await openScene(vp, startScene()); toast('The last scene could not be opened, so a new one was started: ' + e.message, true); }
   } catch (e) {
     $('loading-err').textContent = 'The app could not start: ' + e.message;
     console.error(e);
@@ -761,19 +757,9 @@ function undo() { app.history.undo(); repaintPanel(); app.markDirty(); }
 function redo() { app.history.redo(); repaintPanel(); app.markDirty(); }
 
 async function newScene() {
-  const vp = app.vp;
-  vp.clearModels();
-  vp.settings = startSettings();
-  vp.look = startLook();
-  await setImage(vp, null);
-  await vp.setSimulation({ region: START_REGION, fineness: START_FINENESS });
-  vp.config.build = buildStartScene;
-  vp.populate();
-  await vp.whenModelsReady();
-  vp.resetFluids();
-  Object.assign(vp.camera, START_CAMERA, { target: [...START_CAMERA.target], fov: (START_CAMERA.fov || 42) * Math.PI / 180 });
+  await openScene(app.vp, startScene());
   app.history.reset();
-  app.speedSelect.value = '1';
+  app.speedSelect.value = String(app.vp.settings.speed);
   await autosaveClear();
   app.dirty = true;
   for (const p of Object.values(app.panels)) p.paint();
@@ -950,7 +936,7 @@ function paintInfo() {
         [el('span', {}, el('kbd', {}, 'Ctrl'), ' ', el('kbd', {}, 'S')), 'save the scene as a file'], [el('span', {}, el('kbd', {}, 'Ctrl'), ' ', el('kbd', {}, 'O')), 'open a scene file']]
         .map(([a, b]) => el('tr', {}, el('td', {}, a), el('td', {}, b)))),
     el('h3', {}, 'The start scene'),
-    el('p', {}, 'The app opens on a test bench: red and blue water poured into a clear strip of five cells, mixing to purple by the last, and red and blue smoke carried along beside it by a light wind, with the shapes and tools set out in rows. New brings it back.'),
+    el('p', {}, 'The app opens on a clear basin turned over on a dark floor: two soft colours of smoke rise under it, two pours land on it and spread across the floor to a drain, with one area light and a film look. It opens empty and fills in about 20 seconds. New brings it back.'),
     el('h3', {}, 'Colour and the look of water'),
     el('p', {}, 'Each source has its own colour (Scene tab, with the source selected). Colours mix as dye does: water colours spread where the water is stirred, so yellow and blue make green, and smoke tints what is behind it and its shadow. The Fluids tab sets how the liquid is drawn: Smooth (one surface made from all the particles), Surface (the particles drawn as balls, smoothed together) or Particles.'),
     el('h3', {}, 'Wind and rain'),
