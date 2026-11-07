@@ -71,7 +71,7 @@ const CLEAR =  `
 fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   let n = G();
   if (g.x >= n) { return; }
-  for (var k = 0u; k < 10u; k = k + 1u) { atomicStore(&acc[k * n + g.x], 0); }
+  for (var k = 0u; k < 11u; k = k + 1u) { atomicStore(&acc[k * n + g.x], 0); }
 }`;
 
 const EMIT =  `
@@ -165,6 +165,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   atomicAdd(&acc[7u * n + id], i32(round(a.r * SCALE)));
   atomicAdd(&acc[8u * n + id], i32(round(a.g * SCALE)));
   atomicAdd(&acc[9u * n + id], i32(round(a.b * SCALE)));
+  atomicAdd(&acc[10u * n + id], i32(round(col[i].w * SCALE)));
 }`;
 
 const NORMALIZE =  `
@@ -236,17 +237,13 @@ const SINK_DIV =  `
   }`;
 const PRESSURE = sinks =>  `
 @group(2) @binding(0) var<uniform> parity: vec4<u32>;
+@group(2) @binding(1) var<storage, read> list: array<u32>;
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) g: vec3<u32>) {
-  let nx = u32(P.dims.x);
-  let ny = u32(P.dims.y);
-  let nz = u32(P.dims.z);
-  let i = g.x;
-  if (i >= nx * ny * nz) { return; }
-  let c = vec3<i32>(i32(i % nx), i32((i / nx) % ny), i32(i / (nx * ny)));
+  if (g.x >= list[0]) { return; }
+  let id = list[g.x + 1u];
+  let c = coordOf(id);
   if (u32(c.x + c.y + c.z) % 2u != parity.x) { return; }
-  let id = idx(c);
-  if (cell[id] != 1u) { return; }
   let n = G();
   let sx0 = f32(cellType(c - X) != 2u);
   let sx1 = f32(cellType(c + X) != 2u);
@@ -276,6 +273,29 @@ ${sinks ? SINK_DIV : ''}
   grid[n + iy1] = grid[n + iy1] + sy1 * p;
   grid[2u * n + id] = grid[2u * n + id] - sz0 * p;
   grid[2u * n + iz1] = grid[2u * n + iz1] + sz1 * p;
+}`;
+
+const LIST =  `
+struct Q { dims: vec4<f32> };
+@group(0) @binding(0) var<uniform> P: Q;
+@group(0) @binding(1) var<storage, read> cell: array<u32>;
+@group(0) @binding(2) var<storage, read_write> list: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read_write> args: array<u32>;
+@compute @workgroup_size(1)
+fn start() { atomicStore(&list[0], 0u); }
+@compute @workgroup_size(256)
+fn build(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = g.x;
+  if (i >= u32((P.dims.x + 1.0) * (P.dims.y + 1.0) * (P.dims.z + 1.0))) { return; }
+  if (cell[i] != 1u) { return; }
+  let k = atomicAdd(&list[0], 1u);
+  atomicStore(&list[k + 1u], i);
+}
+@compute @workgroup_size(1)
+fn finish() {
+  args[0] = (atomicLoad(&list[0]) + 255u) / 256u;
+  args[1] = 1u;
+  args[2] = 1u;
 }`;
 
 const G2P =  `
@@ -343,14 +363,17 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   }
   nv = clamp(nv, vec3<f32>(-30.0), vec3<f32>(30.0));
   let around = dyeAround(q, n);
+  var dye = col[i].xyz;
   if (around.w > 1e-6) {
     let rate = P.c.y * length(jostle) / P.dims.w;
-    let a = col[i].xyz;
-    col[i] = vec4<f32>(mix(a, around.xyz / around.w, 1.0 - exp(-rate * P.origin.w)), 0.0);
+    dye = mix(dye, around.xyz / around.w, 1.0 - exp(-rate * P.origin.w));
   }
   p = p + nv * P.origin.w;
   let count = u32(P.b.y);
   let r = P.b.w;
+  var touch = false;
+  var touchN = vec3<f32>(0.0, 1.0, 0.0);
+  var touchV = vec3<f32>(0.0);
   if (count > 0u) {
     let hit = sceneSdf(p, count);
     if (hit.x < r) {
@@ -359,6 +382,9 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
       let ov = solidVelAt(p, O[u32(hit.y)]);
       let vn = dot(nv - ov, nrm);
       if (vn < 0.0) { nv = nv - nrm * vn; }
+      touch = true;
+      touchN = nrm;
+      touchV = ov;
     }
   }
   let lo = P.origin.xyz + vec3<f32>(r);
@@ -367,6 +393,18 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
     if (p[k] < lo[k]) { p[k] = lo[k]; nv[k] = max(nv[k], 0.0); }
     if (p[k] > hi[k]) { p[k] = hi[k]; nv[k] = min(nv[k], 0.0); }
   }
+  if (p.y <= lo.y + 0.5 * P.dims.w) { touch = true; touchN = vec3<f32>(0.0, 1.0, 0.0); touchV = vec3<f32>(0.0); }
+  if (touch && P.c.w > 0.0) {
+    let here = idx(clamp(vec3<i32>(floor((p - P.origin.xyz) / P.dims.w)), vec3<i32>(0), dimsI() - vec3<i32>(1)));
+    let few = 1.0 - smoothstep(1.0, 6.0, f32(atomicLoad(&acc[6u * n + here])));
+    let keep = exp(-P.c.w * (0.1 + few) * P.origin.w);
+    let rel = nv - touchV;
+    let along = rel - touchN * dot(rel, touchN);
+    nv = nv - along * (1.0 - keep);
+  }
+  let knock = length(nv - v) + 0.1 * length(jostle);
+  let foam = min(col[i].w * exp(-P.origin.w / 1.1) + 0.45 * smoothstep(0.32, 1.1, knock), 1.0);
+  col[i] = vec4<f32>(dye, foam);
   pos[i] = vec4<f32>(p, 0.0);
   vel[i] = vec4<f32>(nv, 0.0);
 }`;
@@ -421,6 +459,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
 
 const LOOK =  `
 @group(2) @binding(0) var lookOut: texture_storage_3d<rgba16float, write>;
+@group(2) @binding(1) var foamOut: texture_storage_3d<rgba8unorm, write>;
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   let c = vec3<i32>(g);
@@ -428,22 +467,25 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   let n = G();
   let id = idx(c);
   var out = vec4<f32>(0.0);
+  var foam = 0.0;
   if (cell[id] == 1u) {
     let count = f32(atomicLoad(&acc[6u * n + id]));
     let fill = min(count / P.a.z, 1.0);
     let sums = vec3<f32>(f32(atomicLoad(&acc[7u * n + id])), f32(atomicLoad(&acc[8u * n + id])), f32(atomicLoad(&acc[9u * n + id])));
     out = vec4<f32>(sums / (SCALE * count) * fill, fill);
+    foam = f32(atomicLoad(&acc[10u * n + id])) / (SCALE * count);
   }
   textureStore(lookOut, c, out);
+  textureStore(foamOut, c, vec4<f32>(foam, 0.0, 0.0, 1.0));
 }`;
 
-export const FIELD = { R: 2.0, r: 0.45, fine: 2, soften: 1.0 };
+export const FIELD = { R: 2.0, r: 0.45, fine: 2, soften: 1.0, calm: 0.9 };
 const FIELD_MOST = 4.2e6;
 const FIELD_HEAD =  `
-struct FieldP { dims: vec4<f32>, k: vec4<f32>, origin: vec4<f32> };
+struct FieldP { dims: vec4<f32>, k: vec4<f32>, origin: vec4<f32>, moved: vec4<f32> };
 @group(2) @binding(0) var<uniform> FQ: FieldP;
 @group(2) @binding(1) var<storage, read_write> field: array<atomic<i32>>;
-@group(2) @binding(2) var fieldOut: texture_storage_3d<rgba16float, write>;
+@group(2) @binding(2) var fieldOut: texture_storage_3d<r32float, write>;
 const WSCALE = 4096.0;
 const DSCALE = 1024.0;
 fn fidx(c: vec3<i32>) -> u32 { return u32(c.x + i32(FQ.dims.x) * (c.y + i32(FQ.dims.y) * c.z)); }
@@ -497,11 +539,78 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
     let off = vec3<f32>(f32(atomicLoad(&field[k + 1u])), f32(atomicLoad(&field[k + 2u])), f32(atomicLoad(&field[k + 3u]))) / (DSCALE * W);
     phi = min(length(off) * FQ.dims.w - FQ.k.y * smoothstep(1.0, 3.0, W), FQ.k.w);
   }
-  textureStore(fieldOut, c, vec4<f32>(phi, W, 0.0, 1.0));
+  textureStore(fieldOut, c, vec4<f32>(phi, 0.0, 0.0, 1.0));
+}`;
+const FIELD_ROUND =  `
+struct FieldP { dims: vec4<f32>, k: vec4<f32>, origin: vec4<f32>, moved: vec4<f32> };
+@group(2) @binding(0) var<uniform> FQ: FieldP;
+@group(2) @binding(1) var rawIn: texture_3d<f32>;
+@group(2) @binding(2) var roundOut: texture_storage_3d<r32float, write>;
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+  let c = vec3<i32>(g);
+  let n = vec3<i32>(FQ.dims.xyz);
+  if (any(c >= n)) { return; }
+  let h = FQ.dims.w;
+  let r0 = textureLoad(rawIn, c, 0).x;
+  var s = r0;
+  if (r0 > -0.8 * FQ.k.y && r0 < 2.5 * h) {
+    let side = FQ.moved.w;
+    var sum = r0;
+    var total = 1.0;
+    for (var a = 0; a < 3; a = a + 1) {
+      for (var b = -1; b <= 1; b = b + 2) {
+        var d = vec3<i32>(0);
+        d[a] = b;
+        sum = sum + side * textureLoad(rawIn, clamp(c + d, vec3<i32>(0), n - vec3<i32>(1)), 0).x;
+        total = total + side;
+      }
+    }
+    s = sum / total;
+  }
+  textureStore(roundOut, c, vec4<f32>(s, 0.0, 0.0, 1.0));
+}`;
+const FIELD_SMOOTH =  `
+struct FieldP { dims: vec4<f32>, k: vec4<f32>, origin: vec4<f32>, moved: vec4<f32> };
+@group(2) @binding(0) var<uniform> FQ: FieldP;
+@group(2) @binding(1) var rawIn: texture_3d<f32>;
+@group(2) @binding(2) var lastIn: texture_3d<f32>;
+@group(2) @binding(3) var smoothOut: texture_storage_3d<rgba16float, write>;
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+  let c = vec3<i32>(g);
+  let n = vec3<i32>(FQ.dims.xyz);
+  if (any(c >= n)) { return; }
+  let h = FQ.dims.w;
+  let r0 = textureLoad(rawIn, c, 0).x;
+  var s = r0;
+  if (r0 > -0.8 * FQ.k.y && r0 < 2.5 * h) {
+    var sum = 0.0;
+    var total = 0.0;
+    let side = FQ.moved.w;
+    for (var dz = -1; dz <= 1; dz = dz + 1) {
+      for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+          let w = select(1.0, side, dx != 0) * select(1.0, side, dy != 0) * select(1.0, side, dz != 0);
+          sum = sum + w * textureLoad(rawIn, clamp(c + vec3<i32>(dx, dy, dz), vec3<i32>(0), n - vec3<i32>(1)), 0).x;
+          total = total + w;
+        }
+      }
+    }
+    s = sum / total;
+  }
+  var keep = FQ.origin.w;
+  let was = c + vec3<i32>(FQ.moved.xyz);
+  if (keep > 0.0 && all(was >= vec3<i32>(0)) && all(was < n)) {
+    let last = textureLoad(lastIn, was, 0).x;
+    keep = keep * (1.0 - smoothstep(0.15 * h, 0.8 * h, abs(s - last)));
+    s = mix(s, last, keep);
+  }
+  textureStore(smoothOut, c, vec4<f32>(s, 0.0, 0.0, 1.0));
 }`;
 
 const PASSES = { clear: CLEAR, emit: EMIT, p2g: P2G, normalize: NORMALIZE, boundary: BOUNDARY, pressure: PRESSURE(false), pressureSink: PRESSURE(true),
-  g2p: G2P, drain: DRAIN, columns: COLUMNS, look: LOOK, fieldClear: FIELD_CLEAR, fieldSplat: FIELD_SPLAT, fieldTex: FIELD_TEX };
+  g2p: G2P, drain: DRAIN, columns: COLUMNS, look: LOOK, fieldClear: FIELD_CLEAR, fieldSplat: FIELD_SPLAT, fieldTex: FIELD_TEX, fieldRound: FIELD_ROUND, fieldSmooth: FIELD_SMOOTH };
 
 const CARRY =  `
 struct CP {
@@ -547,6 +656,41 @@ async function carryPipe(d) {
   return carryPipes.get(d);
 }
 
+const TIDY =  `
+@group(0) @binding(0) var<uniform> U: vec4<u32>;
+@group(0) @binding(1) var<storage, read_write> pos: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> vel: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> col: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> holes: array<u32>;
+@group(0) @binding(5) var<storage, read_write> ctl: array<atomic<u32>, 4>;
+@compute @workgroup_size(256)
+fn tidyCount(@builtin(global_invocation_id) g: vec3<u32>) {
+  if (g.x < U.x && pos[g.x].w < 0.5) { atomicAdd(&ctl[0], 1u); }
+}
+@compute @workgroup_size(256)
+fn tidyList(@builtin(global_invocation_id) g: vec3<u32>) {
+  if (g.x < U.x && g.x < atomicLoad(&ctl[0]) && pos[g.x].w >= 0.5) { holes[atomicAdd(&ctl[1], 1u)] = g.x; }
+}
+@compute @workgroup_size(256)
+fn tidyMove(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = g.x;
+  if (i >= U.x || i < atomicLoad(&ctl[0]) || pos[i].w >= 0.5) { return; }
+  let h = holes[atomicAdd(&ctl[2], 1u)];
+  pos[h] = pos[i]; vel[h] = vel[i]; col[h] = col[i];
+  pos[i].w = 1.0;
+}`;
+const tidyPipes = new WeakMap();
+async function tidyPipe(d) {
+  if (!tidyPipes.has(d)) {
+    const layout = makeLayout(d, ['uniform', 'storage', 'storage', 'storage', 'storage', 'storage']);
+    const module = await shaderModule(d, TIDY, 'liquid tidy');
+    tidyPipes.set(d, { layout, count: computePipeline(d, module, [layout], 'tidyCount', 'liquid tidy count'),
+      list: computePipeline(d, module, [layout], 'tidyList', 'liquid tidy list'), move: computePipeline(d, module, [layout], 'tidyMove', 'liquid tidy move') });
+  }
+  return tidyPipes.get(d);
+}
+export const TIDY_WHEN = { least: 4096, share: 0.25 };
+
 export function carriedCount(old, cell) { return Math.round(old.live * Math.pow(old.cell / cell, 3)); }
 
 export class Flip {
@@ -568,6 +712,7 @@ export class Flip {
     this.params = new Float32Array(40);
     this.frame = 0;
     this.mixing = MIXING;
+    this.drag = 30;
   }
 
   get live() { return Math.min(this.spawned, this.maxParticles); }
@@ -582,69 +727,170 @@ export class Flip {
       pos: makeBuffer(d, N * 16, STORAGE(), 'liquid positions'),
       vel: makeBuffer(d, N * 16, STORAGE(), 'liquid velocities'),
       col: makeBuffer(d, N * 16, STORAGE(), 'liquid dye'),
-      acc: makeBuffer(d, G * 10 * 4, STORAGE(), 'liquid grid sums'),
+      acc: makeBuffer(d, G * 11 * 4, STORAGE(), 'liquid grid sums'),
       grid: makeBuffer(d, G * 9 * 4, STORAGE(), 'liquid grid'),
       cell: makeBuffer(d, G * 4, STORAGE(), 'liquid cell kinds'),
       cols: makeBuffer(d, this.dims[0] * this.dims[2] * 16, STORAGE(), 'water level by column'),
+      list: makeBuffer(d, (G + 1) * 4, STORAGE(), 'water cells'),
+      listArgs: makeBuffer(d, 16, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT, 'water cells, sweeps to run'),
     };
     this.paramBuf = makeBuffer(d, this.params.byteLength, UNIFORM(), 'liquid settings');
     const [nx, ny, nz] = this.dims;
     this.lookTex = d.createTexture({ size: { width: nx, height: ny, depthOrArrayLayers: nz }, format: 'rgba16float', dimension: '3d',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC, label: 'liquid as drawn' });
     this.lookView = this.lookTex.createView();
+    this.foamTex = d.createTexture({ size: { width: nx, height: ny, depthOrArrayLayers: nz }, format: 'rgba8unorm', dimension: '3d',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC, label: 'foam as drawn' });
+    this.foamView = this.foamTex.createView();
     this.parityBuf = makeBuffer(d, 512, UNIFORM(), 'sweep colour');
     d.queue.writeBuffer(this.parityBuf, 0, new Uint32Array([0, 0, 0, 0]));
     d.queue.writeBuffer(this.parityBuf, 256, new Uint32Array([1, 0, 0, 0]));
 
     const l0 = makeLayout(d, ['uniform', 'uniform', 'uniform', 'tex3d', 'sampler']);
     const l1 = makeLayout(d, ['storage', 'storage', 'storage', 'storage', 'storage', 'storage', 'storage']);
-    const l2 = makeLayout(d, ['uniform-dyn']);
-    const l3 = makeLayout(d, ['store3d:rgba16float']);
-    const lF = makeLayout(d, ['uniform', 'storage', 'store3d:rgba16float']);
+    const l2 = makeLayout(d, ['uniform-dyn', 'read']);
+    const lL = makeLayout(d, ['uniform', 'read', 'storage', 'storage']);
+    const l3 = makeLayout(d, ['store3d:rgba16float', 'store3d:rgba8unorm']);
+    const lF = makeLayout(d, ['uniform', 'storage', 'store3d:r32float']);
+    const lS = makeLayout(d, ['uniform', 'tex3d-u', 'tex3d-u', 'store3d:rgba16float']);
+    const lR = makeLayout(d, ['uniform', 'tex3d-u', 'store3d:r32float']);
     this.lF = lF;
+    this.lS = lS;
+    this.lR = lR;
     this.group0 = makeGroup(d, l0, [this.paramBuf, this.shared.emitters, this.shared.objects, this.shared.atlasView, this.shared.atlasSampler]);
     const b = this.buf;
     this.group1 = makeGroup(d, l1, [b.pos, b.vel, b.col, b.acc, b.grid, b.cell, b.cols]);
     this.colsRead = d.createBuffer({ size: this.dims[0] * this.dims[2] * 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ, label: 'water level, read back' });
     this.colsBusy = false;
-    this.group2 = makeGroup(d, l2, [{ buffer: this.parityBuf, size: 16 }]);
-    this.group3 = makeGroup(d, l3, [this.lookView]);
+    this.group2 = makeGroup(d, l2, [{ buffer: this.parityBuf, size: 16 }, b.list]);
+    this.listGroup = makeGroup(d, lL, [this.paramBuf, b.cell, b.list, b.listArgs]);
+    const listModule = await shaderModule(d, LIST, 'water cells');
+    this.listPipes = Object.fromEntries(['start', 'build', 'finish'].map(e => [e, computePipeline(d, listModule, [lL], e, 'water cells ' + e)]));
+    this.group3 = makeGroup(d, l3, [this.lookView, this.foamView]);
     this.pipes = {};
     for (const [name, code] of Object.entries(PASSES)) {
       const module = await shaderModule(d, HEADER + code, 'liquid ' + name);
-      const layouts = name.startsWith('pressure') ? [l0, l1, l2] : name === 'look' ? [l0, l1, l3] : name.startsWith('field') ? [l0, l1, lF] : [l0, l1];
+      const layouts = name.startsWith('pressure') ? [l0, l1, l2] : name === 'look' ? [l0, l1, l3] : name === 'fieldSmooth' ? [l0, l1, lS] : name === 'fieldRound' ? [l0, l1, lR] : name.startsWith('field') ? [l0, l1, lF] : [l0, l1];
       this.pipes[name] = computePipeline(d, module, layouts, 'main', 'liquid ' + name);
     }
     this.carry = await carryPipe(d);
+    this.tidyPipes = await tidyPipe(d);
+    this.tidyBuf = { u: makeBuffer(d, 16, UNIFORM(), 'liquid tidy settings'), holes: makeBuffer(d, N * 4, STORAGE(), 'liquid tidy holes'),
+      ctl: makeBuffer(d, 16, STORAGE(), 'liquid tidy counts'),
+      read: d.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ, label: 'liquid tidy counts, read back' }) };
+    this.tidyGroup = makeGroup(d, this.tidyPipes.layout, [this.tidyBuf.u, b.pos, b.vel, b.col, this.tidyBuf.holes, this.tidyBuf.ctl], 'liquid tidy');
+    this.tidyOn = true;
+    this.tidyRound = 0;
+    this.tidied = 0;
+    this.columnsAt = null;
+    this.pouring = [];
   }
 
-  reset() { this.spawned = 0; this.alive = 0; }
+  reset() { this.spawned = 0; this.alive = 0; this.columnsAt = null; this.tidyRound++; this.tidying = false; if (this.field) { this.field.fresh = true; this.field.placed = false; } }
+
+  waterExtent() {
+    const m = Math.max(3 * this.cell, 0.15);
+    let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+    const take = (a, b, c, e) => { x0 = Math.min(x0, a); x1 = Math.max(x1, b); z0 = Math.min(z0, c); z1 = Math.max(z1, e); };
+    if (this.columnsAt) take(...this.columnsAt);
+    for (const s of this.pouring || []) take(s.pos[0] - s.radius, s.pos[0] + s.radius, s.pos[2] - s.radius, s.pos[2] + s.radius);
+    if (x0 > x1) return null;
+    return [x0 - m, x1 + m, z0 - m, z1 + m];
+  }
 
   ensureField() {
-    if (this.field && this.field.ask === FIELD.fine) return this.field;
-    if (this.field) { this.field.params.destroy(); this.field.buf.destroy(); this.field.tex.destroy(); }
+    if (this.field && !this.fieldTooSmall()) return this.field;
+    const wide = !!this.field;
+    if (this.field) this.dropField();
     const d = this.device, [nx, ny, nz] = this.dims;
-    const k = nx * ny * nz * FIELD.fine ** 3 <= FIELD_MOST ? FIELD.fine : 1;
-    const dims = [nx * k, ny * k, nz * k], fine = this.cell / k, n = dims[0] * dims[1] * dims[2];
-    const params = makeBuffer(d, 48, UNIFORM(), 'water field settings');
+    let k = nx * ny * nz * FIELD.fine ** 3 <= FIELD_MOST ? FIELD.fine : 1, dims = [nx * k, ny * k, nz * k], windowed = false;
+    if (k === 1 && !this.fieldWide) {
+      const hy = Math.min(ny, Math.ceil(this.waterHeight() / this.cell)) * FIELD.fine;
+      const side = Math.floor(Math.sqrt(FIELD_MOST / hy) / 8) * 8;
+      const fits = (a, n) => Math.min(side, n * FIELD.fine);
+      const e = this.waterExtent();
+      if (!e || (e[1] - e[0] <= fits(0, nx) * this.cell / FIELD.fine && e[3] - e[2] <= fits(0, nz) * this.cell / FIELD.fine)) {
+        k = FIELD.fine; windowed = true;
+        dims = [fits(0, nx), hy, fits(0, nz)];
+      } else this.fieldWide = true;
+    }
+    const fine = this.cell / k, n = dims[0] * dims[1] * dims[2];
+    const params = makeBuffer(d, 64, UNIFORM(), 'water field settings');
     const buf = makeBuffer(d, n * 16, STORAGE(), 'water field sums');
-    const tex = d.createTexture({ size: { width: dims[0], height: dims[1], depthOrArrayLayers: dims[2] }, format: 'rgba16float', dimension: '3d',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC, label: 'water field' });
-    this.field = { ask: FIELD.fine, dims, fine, k, n, params, buf, tex, view: tex.createView(), group: makeGroup(d, this.lF, [params, buf, tex.createView()]) };
+    const size = { width: dims[0], height: dims[1], depthOrArrayLayers: dims[2] };
+    const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC;
+    const raw = d.createTexture({ size, format: 'r32float', dimension: '3d', usage, label: 'water field, as the drops make it' });
+    const once = d.createTexture({ size, format: 'r32float', dimension: '3d', usage, label: 'water field, smoothed once' });
+    const smooth = [0, 1].map(i => d.createTexture({ size, format: 'rgba16float', dimension: '3d', usage, label: 'water field, smoothed ' + i }));
+    const rv = raw.createView(), ov = once.createView(), sv = smooth.map(t => t.createView());
+    this.field = { dims, fine, k, n, params, buf, raw, once, smooth, views: sv, turn: 0, fresh: true, view: sv[0], windowed, corner: [...this.min],
+      roundGroup: makeGroup(d, this.lR, [params, rv, ov]),
+      group: makeGroup(d, this.lF, [params, buf, rv]),
+      smoothGroups: [0, 1].map(i => makeGroup(d, this.lS, [params, ov, sv[1 - i], sv[i]])) };
     return this.field;
+  }
+  waterHeight() {
+    let top = 0.3;
+    for (const s of this.pouring || []) {
+      const up = Math.max((s.dir ? s.dir[1] : 0) * (s.speed || 0), 0);
+      top = Math.max(top, s.pos[1] - this.min[1] + up * up / 19.6 + 0.3);
+    }
+    return Math.max(top, this.levelTop || 0) + 2 * this.cell;
+  }
+  fieldTooSmall() {
+    const f = this.field;
+    if (!f.windowed) return false;
+    const e = this.waterExtent();
+    if (this.waterHeight() > f.dims[1] * f.fine + 1e-6 && f.dims[1] < this.dims[1] * f.k) return true;
+    return !!e && (e[1] - e[0] > f.dims[0] * f.fine || e[3] - e[2] > f.dims[2] * f.fine);
+  }
+  placeField() {
+    const f = this.field, moved = [0, 0, 0];
+    if (!f.windowed) return moved;
+    const e = this.waterExtent();
+    if (!e) return moved;
+    for (const [i, lo, hi] of [[0, e[0], e[1]], [2, e[2], e[3]]]) {
+      const span = f.dims[i] * f.fine, boxLo = this.min[i], boxHi = this.max[i];
+      let c = f.corner[i];
+      if (!f.placed || lo < c || hi > c + span) c = (lo + hi - span) / 2;
+      c = Math.max(boxLo, Math.min(c, boxHi - span));
+      c = boxLo + Math.round((c - boxLo) / (f.fine * 4)) * f.fine * 4;
+      c = Math.max(boxLo, Math.min(c, boxHi - span));
+      moved[i] = Math.round((c - f.corner[i]) / f.fine);
+      f.corner[i] = c;
+    }
+    f.placed = true;
+    return moved;
+  }
+  dropField() {
+    const f = this.field;
+    if (!f) return;
+    f.params.destroy(); f.buf.destroy(); f.raw.destroy(); f.once.destroy(); f.smooth.forEach(t => t.destroy());
+    this.field = null;
   }
 
   buildField(pass) {
     const f = this.ensureField();
-    const reach = FIELD.R * f.k, r = FIELD.r * this.cell;
-    this.device.queue.writeBuffer(f.params, 0, new Float32Array([...f.dims, f.fine, reach, r, this.live, reach * f.fine - r, ...this.min, 0]));
+    const moved = this.placeField();
+    const reach = FIELD.R * f.k, r = Math.max(FIELD.r * this.cell, 0.75 * f.fine);
+    this.device.queue.writeBuffer(f.params, 0, new Float32Array([...f.dims, f.fine, reach, r, this.live, reach * f.fine - r, ...f.corner, f.fresh ? 0 : FIELD.calm, ...moved, f.k > 1 ? 0.5 : 0.17]));
+    f.fresh = false;
     pass.setBindGroup(0, this.group0);
     pass.setBindGroup(1, this.group1);
     pass.setBindGroup(2, f.group);
     pass.setPipeline(this.pipes.fieldClear); pass.dispatchWorkgroups(Math.ceil(f.n * 4 / 256));
     if (this.live > 0) { pass.setPipeline(this.pipes.fieldSplat); pass.dispatchWorkgroups(Math.ceil(this.live / 256)); }
+    const wg = f.dims.map(v => Math.ceil(v / 4));
     pass.setPipeline(this.pipes.fieldTex);
-    pass.dispatchWorkgroups(Math.ceil(f.dims[0] / 4), Math.ceil(f.dims[1] / 4), Math.ceil(f.dims[2] / 4));
+    pass.dispatchWorkgroups(...wg);
+    pass.setPipeline(this.pipes.fieldRound);
+    pass.setBindGroup(2, f.roundGroup);
+    pass.dispatchWorkgroups(...wg);
+    f.turn = 1 - f.turn;
+    pass.setPipeline(this.pipes.fieldSmooth);
+    pass.setBindGroup(2, f.smoothGroups[f.turn]);
+    pass.dispatchWorkgroups(...wg);
+    f.view = f.views[f.turn];
   }
 
   carryFrom(old) {
@@ -674,19 +920,55 @@ export class Flip {
   destroy() {
     for (const b of Object.values(this.buf)) b.destroy();
     this.lookTex.destroy();
+    this.foamTex.destroy();
     this.paramBuf.destroy();
     this.parityBuf.destroy();
     this.colsRead.destroy();
-    if (this.field) { this.field.params.destroy(); this.field.buf.destroy(); this.field.tex.destroy(); this.field = null; }
+    for (const k of ['u', 'holes', 'ctl', 'read']) this.tidyBuf[k].destroy();
+    this.dropField();
   }
 
   endFrame(encoder) {
+    this.tidy(encoder);
     if (this.colsBusy || this.live === 0) return;
     encoder.copyBufferToBuffer(this.buf.cols, 0, this.colsRead, 0, this.dims[0] * this.dims[2] * 16);
     this.colsPending = true;
   }
 
+  tidy(encoder) {
+    const live = this.live;
+    if (!this.tidyOn || this.tidying || this.tidyBusy || this.alive == null) return;
+    if (live - this.alive < Math.max(TIDY_WHEN.least, live * TIDY_WHEN.share)) return;
+    const q = this.device.queue, B = this.tidyBuf, P = this.tidyPipes, groups = Math.ceil(live / 256);
+    q.writeBuffer(B.u, 0, new Uint32Array([live, 0, 0, 0]));
+    q.writeBuffer(B.ctl, 0, new Uint32Array(4));
+    const pass = encoder.beginComputePass({ label: 'liquid tidy' });
+    pass.setBindGroup(0, this.tidyGroup);
+    for (const pipe of [P.count, P.list, P.move]) { pass.setPipeline(pipe); pass.dispatchWorkgroups(groups); }
+    pass.end();
+    encoder.copyBufferToBuffer(B.ctl, 0, B.read, 0, 16);
+    this.tidying = true;
+    this.tidyAsk = true;
+  }
+
+  readTidy() {
+    if (!this.tidyAsk) return;
+    this.tidyAsk = false;
+    this.tidyBusy = true;
+    const round = this.tidyRound;
+    this.tidyBuf.read.mapAsync(GPUMapMode.READ).then(() => {
+      const n = new Uint32Array(this.tidyBuf.read.getMappedRange().slice(0))[0];
+      this.tidyBuf.read.unmap();
+      this.tidyBusy = false;
+      if (round !== this.tidyRound) return;
+      this.spawned = n;
+      this.tidying = false;
+      this.tidied++;
+    }).catch(() => { this.tidyBusy = false; this.tidying = false; });
+  }
+
   readWater() {
+    this.readTidy();
     if (!this.colsPending || this.colsBusy) return null;
     this.colsPending = false;
     this.colsBusy = true;
@@ -694,9 +976,29 @@ export class Flip {
       const cols = new Float32Array(this.colsRead.getMappedRange().slice(0));
       this.colsRead.unmap();
       this.colsBusy = false;
-      let n = 0;
-      for (let i = 3; i < cols.length; i += 4) n += cols[i];
+      let n = 0, levelTop = 0;
+      const nx = this.dims[0], nz = this.dims[2];
+      const byX = this.byX ||= new Float64Array(nx), byZ = this.byZ ||= new Float64Array(nz);
+      byX.fill(0); byZ.fill(0);
+      for (let z = 0, i = 3; z < nz; z++) for (let x = 0; x < nx; x++, i += 4) {
+        const c = cols[i];
+        if (c > 0) { n += c; byX[x] += c; byZ[z] += c; if (cols[i - 3] > levelTop) levelTop = cols[i - 3]; }
+      }
+      this.levelTop = levelTop - this.min[1];
       this.alive = n;
+      const ends = a => {
+        const skip = n * 0.01;
+        let lo = 0, hi = a.length - 1, s = 0;
+        while (lo < hi && s + a[lo] <= skip) s += a[lo++];
+        s = 0;
+        while (hi > lo && s + a[hi] <= skip) s += a[hi--];
+        return [lo, hi];
+      };
+      const h = this.cell, m = this.min;
+      if (n > 0) {
+        const [x0, x1] = ends(byX), [z0, z1] = ends(byZ);
+        this.columnsAt = [m[0] + x0 * h, m[0] + (x1 + 1) * h, m[2] + z0 * h, m[2] + (z1 + 1) * h];
+      } else this.columnsAt = null;
       return { min: [this.min[0], this.min[2]], cell: this.cell, nx: this.dims[0], nz: this.dims[2], cols };
     }).catch(() => { this.colsBusy = false; return null; });
   }
@@ -709,6 +1011,7 @@ export class Flip {
           pts.push([x + (Math.random() - 0.5) * h * 0.5, y + (Math.random() - 0.5) * h * 0.5, z + (Math.random() - 0.5) * h * 0.5]);
     const count = Math.min(pts.length, this.maxParticles - this.live);
     if (count <= 0) return 0;
+    this.tidyRound++; this.tidying = false;
     const first = this.spawned % this.maxParticles;
     const p = new Float32Array(count * 4), v = new Float32Array(count * 4), c = new Float32Array(count * 4);
     const dye = dyeOf(color);
@@ -724,11 +1027,12 @@ export class Flip {
   planEmission(emitters, frameDt, flow) {
     let total = 0;
     this.drains = emitters.filter(e => e.type === 'liquid' && e.sink).length;
+    this.pouring = emitters.filter(e => e.type === 'liquid' && !e.sink && e.rate > 0);
     for (const e of emitters) {
       if (e.type !== 'liquid' || e.sink) continue;
       const perSecond = flow * e.rate * Math.PI * e.radius * e.radius * e.speed / this.particleVolume;
       e.carry = (e.carry || 0) + perSecond * frameDt;
-      const n = Math.floor(e.carry);
+      const n = this.tidying ? 0 : Math.floor(e.carry);
       e.carry -= n;
       e.newFirst = total;
       e.newCount = n;
@@ -749,13 +1053,13 @@ export class Flip {
     const st = s.stir;
     p.set(st ? [...st.origin, st.radius, ...st.dir, 1, ...st.vel, 0] : new Array(12).fill(0), 16);
     p.set([this.newCount || 0, this.maxParticles, this.firstSlot || 0, this.frame++], 28);
-    p.set([s.frameDt, this.mixing, this.drains || 0, 0], 32);
+    p.set([s.frameDt, this.mixing, this.drains || 0, this.drag], 32);
     p.set(s.wind ? [...s.wind.vel, s.wind.grip] : [0, 0, 0, 0], 36);
     this.device.queue.writeBuffer(this.paramBuf, 0, p);
   }
 
   step(pass, substeps) {
-    const wgG = Math.ceil(this.G / 256), wgC = Math.ceil(this.cells / 256);
+    const wgG = Math.ceil(this.G / 256);
     const live = Math.ceil(this.live / 256);
     pass.setBindGroup(0, this.group0);
     pass.setBindGroup(1, this.group1);
@@ -769,10 +1073,16 @@ export class Flip {
       pass.setPipeline(this.pipes.p2g); pass.dispatchWorkgroups(live);
       pass.setPipeline(this.pipes.normalize); pass.dispatchWorkgroups(wgG);
       pass.setPipeline(this.pipes.boundary); pass.dispatchWorkgroups(wgG);
+      pass.setBindGroup(0, this.listGroup);
+      pass.setPipeline(this.listPipes.start); pass.dispatchWorkgroups(1);
+      pass.setPipeline(this.listPipes.build); pass.dispatchWorkgroups(wgG);
+      pass.setPipeline(this.listPipes.finish); pass.dispatchWorkgroups(1);
+      pass.setBindGroup(0, this.group0);
+      pass.setBindGroup(1, this.group1);
       pass.setPipeline(this.drains ? this.pipes.pressureSink : this.pipes.pressure);
       for (let it = 0; it < this.iterations; it++) {
-        pass.setBindGroup(2, this.group2, [0]); pass.dispatchWorkgroups(wgC);
-        pass.setBindGroup(2, this.group2, [256]); pass.dispatchWorkgroups(wgC);
+        pass.setBindGroup(2, this.group2, [0]); pass.dispatchWorkgroupsIndirect(this.buf.listArgs, 0);
+        pass.setBindGroup(2, this.group2, [256]); pass.dispatchWorkgroupsIndirect(this.buf.listArgs, 0);
       }
       pass.setPipeline(this.pipes.g2p); pass.dispatchWorkgroups(live);
       if (this.drains) { pass.setPipeline(this.pipes.drain); pass.dispatchWorkgroups(live); }

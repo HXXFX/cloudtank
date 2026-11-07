@@ -64,6 +64,7 @@ export function makeLayout(device, spec, stage = 'compute') {
     else if (s === 'tex3d-u') e.texture = { sampleType: 'unfilterable-float', viewDimension: '3d' };
     else if (s === 'tex2d') e.texture = { sampleType: 'float', viewDimension: '2d' };
     else if (s === 'tex2d-u') e.texture = { sampleType: 'unfilterable-float', viewDimension: '2d' };
+    else if (s === 'tex2d-array') e.texture = { sampleType: 'float', viewDimension: '2d-array' };
     else if (s === 'depth') e.texture = { sampleType: 'depth', viewDimension: '2d' };
     else if (s === 'depth-array') e.texture = { sampleType: 'depth', viewDimension: '2d-array' };
     else if (s === 'sampler') e.sampler = { type: 'filtering' };

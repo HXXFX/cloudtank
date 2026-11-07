@@ -14,6 +14,9 @@ export function seenId(id) { nextId = Math.max(nextId, id + 1); }
 const count = {};
 export function nameFor(label) { count[label] = (count[label] || 0) + 1; return `${label} ${count[label]}`; }
 
+export const OBJECT_OPTIONS = ['hidden', 'noShadow', 'blocksFluid', 'noGravity', 'linDamp', 'angDamp', 'massKg', 'bounce', 'grip'];
+export const optionsOf = o => Object.fromEntries(OBJECT_OPTIONS.filter(k => o[k] !== undefined && (k === 'blocksFluid' || (o[k] !== false && o[k] !== 0))).map(k => [k, o[k]]));
+
 export function sourceLabel(e) {
   if (e.sink) return e.type === 'smoke' ? 'Extractor' : 'Drain';
   return e.type === 'smoke' ? 'Smoke source' : 'Liquid source';
@@ -35,31 +38,40 @@ export class Scene {
     this.marks = [];
     this.lights = [];
     this.selected = null;
+    this.picks = [];
     this.models = new Map();
+    this.images = new Map();
   }
 
   get items() { return [...this.objects, ...this.emitters, ...this.lights, ...this.marks]; }
+  isPicked(it) { return !!it && (it === this.selected || this.picks.includes(it)); }
 
   addObject({ shape = 'box', pos = [0, 0.5, 0], size, rot = [0, 0, 0], color = [0.8, 0.8, 0.8], model = null, name, id,
-    moves = false, collides = true, material = 'wood', home = null, finish = null, motion = null, asset = null }) {
+    moves = false, collides = true, material = 'wood', home = null, finish = null, motion = null, asset = null, whenInBox = null, pbr = null, tex = null, decals = null, partLooks = null, ...options }) {
     if (this.objects.length >= MAX_OBJECTS) return null;
     const def = SHAPES[shape];
     const o = { id: id || takeId(), kind: 'object', shape, name: name || nameFor(model ? this.models.get(model).name : def.label),
       pos: [...pos], size: [...(size || def.size)], rot: [...rot], color: [...color], model,
       moves, collides, material, home: home ? { pos: [...home.pos], rot: [...home.rot] } : { pos: [...pos], rot: [...rot] },
       finish: finish || null, motion: motion ? { ...motion } : null, asset: asset || null,
-      vel: [0, 0, 0], spin: [0, 0, 0], last: [...pos] };
+      whenInBox: whenInBox && (whenInBox.moves || whenInBox.parts) ? { ...whenInBox } : null,
+      vel: [0, 0, 0], spin: [0, 0, 0], last: [...pos], ...optionsOf(options) };
+    if (pbr) o.pbr = { ...pbr };
+    if (tex) o.tex = JSON.parse(JSON.stringify(tex));
+    if (decals && decals.length) o.decals = JSON.parse(JSON.stringify(decals));
+    if (partLooks) o.partLooks = JSON.parse(JSON.stringify(partLooks));
     if (id) seenId(id);
     this.objects.push(o);
     return o;
   }
 
   addEmitter({ type = 'smoke', pos = [0, 0.3, 0], radius = 0.25, color = [0.9, 0.9, 0.9], dir = [0, 1, 0], speed = 1, rate = 1, on = true, name, id,
-    heat = 1, pulse = null, sink = false, attach = null }) {
+    heat = 1, pulse = null, sink = false, attach = null, hidden = false }) {
     if (this.emitters.length >= MAX_EMITTERS) return null;
     const e = { id: id || takeId(), kind: 'emitter', type, name: name || nameFor(sourceLabel({ type, sink })),
       pos: [...pos], radius, color: [...color], dir: [...dir], speed, rate, on, heat, pulse: pulse ? { ...pulse } : null, sink: !!sink,
-      attach: attach && attach.to != null ? { to: attach.to } : null, vel: [0, 0, 0], last: [...pos] };
+      attach: attach && attach.to != null ? { to: attach.to, ...(Number.isInteger(attach.part) ? { part: attach.part } : {}) } : null,
+      vel: [0, 0, 0], last: [...pos], ...(hidden ? { hidden: true } : {}) };
     if (id) seenId(id);
     this.emitters.push(e);
     return e;
@@ -94,7 +106,8 @@ export class Scene {
       if (m.from === g.id) m.from = null;
       if (m.to === g.id) m.to = null;
     }
-    if (gone.includes(this.selected)) this.selected = null;
+    this.picks = this.picks.filter(p => !gone.includes(p));
+    if (gone.includes(this.selected)) this.selected = this.picks[this.picks.length - 1] || null;
   }
 
   tick(dt) {
@@ -107,9 +120,33 @@ export class Scene {
 
   meshOf(o) { return o.model ? this.models.get(o.model).mesh : unitMesh(o.shape); }
 
+  surfaceHit(ray, o) {
+    const mesh = this.meshOf(o), ax = eulerAxes(o.rot), s = o.size;
+    const lo = toLocal(ray.origin, o.pos, ax).map((v, k) => v / s[k]);
+    const ld = [dot(ray.dir, ax[0]) / s[0], dot(ray.dir, ax[1]) / s[1], dot(ray.dir, ax[2]) / s[2]];
+    let best = null, tri = -1;
+    for (let i = 0; i < mesh.length; i += 18) {
+      const t = rayTri(lo, ld, mesh, i);
+      if (t !== null && t > 1e-5 && (best === null || t < best)) { best = t; tri = i; }
+    }
+    if (best === null) return null;
+    const at = [lo[0] + ld[0] * best, lo[1] + ld[1] * best, lo[2] + ld[2] * best];
+    let dir = normalize([(mesh[tri + 3] + mesh[tri + 9] + mesh[tri + 15]) / s[0], (mesh[tri + 4] + mesh[tri + 10] + mesh[tri + 16]) / s[1], (mesh[tri + 5] + mesh[tri + 11] + mesh[tri + 17]) / s[2]]);
+    const toEye = [-ld[0] * s[0], -ld[1] * s[1], -ld[2] * s[2]];
+    if (dot(dir, toEye) < 0) dir = dir.map(v => -v);
+    const m = o.model ? this.models.get(o.model) : null;
+    let part = -1;
+    if (m && m.parts && m.parts.length > 1) {
+      const corner = tri / 6;
+      part = m.parts.findIndex(p => corner >= p.first && corner < p.first + p.count);
+    }
+    return { at, dir, part, t: best, point: add(ray.origin, scale(ray.dir, best)) };
+  }
+
   pick(ray, { ground = true, emitters = true } = {}) {
     let best = null;
     if (emitters) for (const e of this.emitters) {
+      if (e.hidden) continue;
       const t = raySphere(ray, e.pos, Math.max(e.radius * 0.6, 0.1));
       if (t !== null && (!best || t < best.t)) best = { item: e, t };
     }
@@ -118,6 +155,7 @@ export class Scene {
       if (t !== null && (!best || t < best.t)) best = { item: l, t };
     }
     for (const o of this.objects) {
+      if (o.hidden) continue;
       const t = rayObject(ray, o, this.meshOf(o));
       if (t !== null && (!best || t < best.t)) best = { item: o, t };
     }
@@ -128,21 +166,23 @@ export class Scene {
 
   packObjects(out = new Float32Array(MAX_OBJECTS * OBJ_FLOATS)) {
     out.fill(0);
-    this.objects.forEach((o, i) => packObject(out, i, o, this.selected === o ? 1 : 0, this.models));
+    this.objects.forEach((o, i) => packObject(out, i, o, this.isPicked(o) ? 1 : 0, this.models));
     return out;
   }
 }
 
-export const OBJECT_FINISH = { matte: 1, metal: 2, glass: 3, gloss: 4 };
+export const OBJECT_FINISH = { matte: 1, metal: 2, glass: 3, gloss: 4, frosted: 5 };
 
-export function packObject(out, i, o, flag, models) {
+export function packObject(out, i, o, flag, models, look = o) {
   const ax = eulerAxes(o.rot);
   const m = o.model ? models.get(o.model) : null;
   const prop = m ? m.prop : [1, 1, 1];
   const code = SHAPES[o.shape].code;
   const spin = o.spin || [0, 0, 0];
+  let fin = OBJECT_FINISH[look.finish] || 0;
+  if (fin === 3 || fin === 5) fin = (look.pbr && look.pbr.rough !== undefined ? look.pbr.rough : fin === 5 ? 0.5 : 0) > 0 ? 5 : 3;
   out.set([...o.pos, code, ...o.size, m ? m.slot : 0, ...o.vel, length(o.size) * 1.2,
-    ...o.color, flag, ...ax[0], prop[0], ...ax[1], prop[1], ...ax[2], prop[2], ...spin, OBJECT_FINISH[o.finish] || 0], i * OBJ_FLOATS);
+    ...look.color, flag, ...ax[0], prop[0], ...ax[1], prop[1], ...ax[2], prop[2], ...spin, fin], i * OBJ_FLOATS);
 }
 
 function raySphere(ray, c, r) {

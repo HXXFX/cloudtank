@@ -2,7 +2,7 @@ import { ARCH, STEPS } from './shapes.js';
 
 export const MAX_OBJECTS = 64;
 export const OBJ_FLOATS = 32;
-export const MAX_EMITTERS = 8;
+export const MAX_EMITTERS = 32;
 export const ATLAS_RES = 64;
 export const ATLAS_SLOTS = 32;
 export const ATLAS_PAD = 1.15;

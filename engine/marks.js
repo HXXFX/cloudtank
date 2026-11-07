@@ -169,6 +169,7 @@ export function drawMarks(ctx, vp, W, H, hits) {
   hits.clear();
   const cam = vp.camera, sel = vp.scene.selected;
   for (const m of vp.scene.marks) {
+    if (m.hidden) continue;
     const hit = { rect: null, segs: [], anchor: null };
     hits.set(m.id, hit);
     ctx.save();
@@ -214,7 +215,7 @@ export function drawMarks(ctx, vp, W, H, hits) {
     } else if (m.type === 'grid' || m.type === 'outline') {
       drawFrame3(ctx, vp, m, W, H, hit);
     }
-    if (m === sel) highlight(ctx, hit);
+    if (m === sel || vp.scene.isPicked(m)) highlight(ctx, hit);
     ctx.restore();
   }
 }

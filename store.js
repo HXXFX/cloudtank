@@ -1,6 +1,8 @@
 import { itemData, restoreItems } from './history.js';
 import { copy } from './engine/environment.js';
 import { assetModel } from './engine/assets.js';
+import { wakeOldKits, clearOldTiles } from './start-scene.js';
+import { imagesOf } from './engine/material.js';
 
 const FORMAT = 'fluidsim-scene';
 export const FILE_EXT = 'cloudtank';
@@ -13,13 +15,18 @@ export function sceneData(vp, { forFile }) {
     id: m.id, name: m.name, prop: m.prop, zUp: m.zUp, color: m.color, fileHalf: m.fileHalf,
     positions: forFile ? toB64(m.positions) : m.positions,
     normals: forFile ? toB64(m.normals) : m.normals,
+    ...(m.uvs ? { uvs: forFile ? toB64(m.uvs) : m.uvs } : {}), ...(m.parts ? { parts: m.parts } : {}),
   }));
   const look = copy({ ...vp.look, background: { ...vp.look.background, image: null } });
+  const usedImages = new Set();
+  imagesOf(vp.look.ground, usedImages);
+  for (const o of s.objects) { imagesOf(o, usedImages); for (const p of o.partLooks || []) imagesOf(p, usedImages); }
+  const images = [...usedImages].map(id => s.images.get(id)).filter(Boolean).map(m => ({ id: m.id, name: m.name, data: forFile ? m.dataUrl : m.blob }));
   return {
-    format: FORMAT, version: VERSION, savedAt: new Date().toISOString(),
+    format: FORMAT, version: VERSION, kits: 2, frosted: 1, savedAt: new Date().toISOString(),
     camera: { target: vp.camera.target, distance: vp.camera.distance, yaw: vp.camera.yaw, pitch: vp.camera.pitch, fov: vp.camera.fov },
     settings: { ...vp.settings }, look, region: copy(vp.region), fineness: { ...vp.fineness },
-    objects: s.objects.map(itemData), emitters: s.emitters.map(itemData), lights: s.lights.map(itemData), marks: s.marks.map(itemData), models,
+    objects: s.objects.map(itemData), emitters: s.emitters.map(itemData), lights: s.lights.map(itemData), marks: s.marks.map(itemData), models, images,
     image: vp.bgImage ? (forFile ? vp.bgImage.dataUrl : vp.bgImage.blob) : null,
     imageName: vp.bgImage ? vp.bgImage.name : null,
   };
@@ -41,9 +48,16 @@ export async function openScene(vp, data) {
       continue;
     }
     vp.addModel({ name: m.name, prop: m.prop, zUp: m.zUp, color: m.color, fileHalf: m.fileHalf,
-      positions: fromData(m.positions), normals: fromData(m.normals) }, { id: m.id });
+      positions: fromData(m.positions), normals: fromData(m.normals), uvs: m.uvs ? fromData(m.uvs) : null, parts: m.parts || null }, { id: m.id });
+  }
+  for (const m of data.images || []) {
+    const blob = typeof m.data === 'string' ? await (await fetch(m.data)).blob() : m.data;
+    await vp.addImage(blob, m.name, { id: m.id });
   }
   restoreItems(vp.scene, data);
+  if (!data.kits) wakeOldKits(vp.scene);
+  if (!data.frosted) for (const o of vp.scene.objects) if (o.asset === 'frosted-ball' && o.finish === 'glass') o.finish = 'frosted';
+  clearOldTiles(vp);
   vp.select(null);
   if (data.camera) Object.assign(vp.camera, { fov: 42 * Math.PI / 180 }, data.camera);
   await setImage(vp, data.image, data.imageName);

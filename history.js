@@ -1,3 +1,5 @@
+import { optionsOf } from './engine/scene.js';
+import { lookData, imagesOf } from './engine/material.js';
 
 export function itemData(it) {
   if (it.kind === 'object') {
@@ -5,7 +7,9 @@ export function itemData(it) {
       rot: [...it.rot], color: [...it.color], model: it.model || null,
       moves: !!it.moves, collides: it.collides !== false, material: it.material || 'wood',
       home: it.home ? { pos: [...it.home.pos], rot: [...it.home.rot] } : null,
-      finish: it.finish || null, motion: it.motion ? { ...it.motion } : null, asset: it.asset || null };
+      finish: it.finish || null, motion: it.motion ? { ...it.motion } : null, asset: it.asset || null,
+      ...lookData(it), ...(it.partLooks ? { partLooks: it.partLooks.map(p => ({ color: [...p.color], finish: p.finish || null, ...lookData(p) })) } : {}),
+      ...(it.whenInBox ? { whenInBox: { ...it.whenInBox } } : {}), ...optionsOf(it) };
   }
   if (it.kind === 'mark') { const { held, ...rest } = it; return JSON.parse(JSON.stringify(rest)); }
   if (it.kind === 'light') {
@@ -14,7 +18,7 @@ export function itemData(it) {
   }
   return { id: it.id, kind: 'emitter', type: it.type, name: it.name, pos: [...it.pos], radius: it.radius,
     color: [...it.color], dir: [...it.dir], speed: it.speed, rate: it.rate, heat: it.heat ?? 1, on: it.on !== false,
-    pulse: it.pulse ? { ...it.pulse } : null, ...(it.sink ? { sink: true } : {}), ...(it.attach ? { attach: { to: it.attach.to } } : {}) };
+    pulse: it.pulse ? { ...it.pulse } : null, ...(it.sink ? { sink: true } : {}), ...(it.attach ? { attach: { to: it.attach.to, ...(Number.isInteger(it.attach.part) ? { part: it.attach.part } : {}) } } : {}), ...(it.hidden ? { hidden: true } : {}) };
 }
 
 export function restoreItems(scene, data) {
@@ -38,17 +42,24 @@ export class History {
 
   snapshot() {
     const s = this.vp.scene;
-    return JSON.stringify({ objects: s.objects.map(itemData), emitters: s.emitters.map(itemData), lights: s.lights.map(itemData), marks: s.marks.map(itemData) });
+    return JSON.stringify({ objects: s.objects.map(itemData), emitters: s.emitters.map(itemData), lights: s.lights.map(itemData), marks: s.marks.map(itemData), ground: lookData(this.vp.look.ground) });
   }
 
-  reset() { this.stack = [this.snapshot()]; this.at = 0; this.onChange(); }
+  selection() {
+    const S = this.vp.scene, all = S.picks.length ? S.picks : S.selected ? [S.selected] : [];
+    return [...all.filter(i => i !== S.selected), ...(S.selected ? [S.selected] : [])].map(i => i.id);
+  }
+
+  reset() { this.stack = [this.snapshot()]; this.sels = [this.selection()]; this.at = 0; this.onChange(); }
 
   commit() {
     const s = this.snapshot();
     if (s === this.stack[this.at]) return;
     this.stack.length = this.at + 1;
+    this.sels.length = this.at + 1;
     this.stack.push(s);
-    if (this.stack.length > 200) this.stack.shift();
+    this.sels.push(this.selection());
+    if (this.stack.length > 200) { this.stack.shift(); this.sels.shift(); }
     this.at = this.stack.length - 1;
     this.onChange();
   }
@@ -60,11 +71,27 @@ export class History {
   redo() { if (this.canRedo) { this.at++; this.apply(); } }
 
   apply() {
-    const sel = this.vp.scene.selected ? this.vp.scene.selected.id : null;
-    restoreItems(this.vp.scene, JSON.parse(this.stack[this.at]));
-    this.vp.select(this.vp.scene.items.find(i => i.id === sel) || null);
+    const S = this.vp.scene, now = this.selection(), step = JSON.parse(this.stack[this.at]);
+    restoreItems(S, step);
+    const G = this.vp.look.ground;
+    delete G.pbr; delete G.tex; delete G.decals;
+    Object.assign(G, step.ground || {});
+    const items = S.items, find = ids => ids.map(id => items.find(i => i.id === id)).filter(Boolean);
+    const kept = find((this.sels && this.sels[this.at]) || []), again = kept.length ? kept : find(now);
+    if (again.length > 1) this.vp.selectAll(again);
+    else this.vp.select(again[0] || null);
     this.vp.emit('change');
     this.onChange();
+  }
+
+  imagesInUse() {
+    const used = new Set();
+    for (const s of this.stack) {
+      const d = JSON.parse(s);
+      imagesOf(d.ground || {}, used);
+      for (const o of d.objects) { imagesOf(o, used); for (const p of o.partLooks || []) imagesOf(p, used); }
+    }
+    return used;
   }
 
   modelsInUse() {

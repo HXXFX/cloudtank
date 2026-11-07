@@ -89,7 +89,7 @@ function bake(pos, prop, N, P) {
   const field = new Float32Array(cells);
   for (let i = 0; i < cells; i++) {
     const d = Number.isFinite(dist[i]) ? dist[i] : 2 * P;
-    const inside = dist[i] < wall ? side[i] < 0 : !out[i];
+    const inside = dist[i] < wall && side[i] !== 0 ? side[i] < 0 : !out[i];
     field[i] = inside ? -d : d;
   }
   return field;

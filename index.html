@@ -19,6 +19,8 @@
 <div class="glass flyout" id="flyout" hidden></div>
 <div class="glass more" id="more" role="menu" aria-label="More" hidden></div>
 <div class="glass more ctx" id="ctx" role="menu" aria-label="Actions" hidden></div>
+<div class="glass more showmenu" id="show" role="menu" aria-label="Show" hidden></div>
+<div class="glass more imgmenu" id="imgmenu" role="dialog" aria-label="Use this image as" hidden></div>
 <aside class="glass panel" id="panel" aria-label="Settings">
   <div class="tabs" id="tabs" role="tablist"></div>
   <div class="body" id="body"></div>
@@ -28,8 +30,8 @@
 <div class="hint" id="hint">Drag: turn the view · Right-drag: slide the view · Wheel: zoom · Click a thing, then drag its handles: W move, E turn, R size</div>
 <div class="toast" id="toast" hidden></div>
 <div class="dialog" id="info" hidden></div>
-<div class="drop" id="drop" hidden>Drop a model file to add it (.glb, .gltf, .obj, .stl)</div>
-<input type="file" id="model-file" accept=".glb,.gltf,.obj,.stl,.bin" multiple hidden>
+<div class="drop" id="drop" hidden>Drop a model to add it, or an image on a thing to texture it</div>
+<input type="file" id="model-file" accept=".glb,.gltf,.obj,.mtl,.stl,.fbx,.usdz,.usda,.usdc,.usd,.bin,.png,.jpg,.jpeg,.webp" multiple hidden>
 <input type="file" id="scene-file" accept=".cloudtank,.fluidsim,.json" hidden>
 <input type="file" id="image-file" accept="image/*" hidden>
 <div class="loading" id="loading"><div>Preparing the graphics card…</div><div class="bar"><i></i></div><div class="err" id="loading-err"></div></div>

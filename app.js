@@ -1,14 +1,17 @@
 import { Viewport, motionAt } from './engine/viewport.js';
 import { cardName } from './engine/gpu.js';
 import { SHAPES } from './engine/shapes.js';
-import { readModelFiles } from './engine/importers.js';
+import { readModelFiles, looksFromFile } from './engine/importers.js';
+import { imageMenu } from './ui/imagedrop.js';
+import { isImageFile } from './engine/images.js';
+import { lookData } from './engine/material.js';
 import { hexToRgb } from './engine/settings.js';
 import { MOVES_BY_DEFAULT } from './engine/physics.js';
-import { MAX_OBJECTS, MAX_EMITTERS, MAX_MARKS, MAX_LIGHTS, LIGHT_KINDS } from './engine/scene.js';
+import { MAX_OBJECTS, MAX_EMITTERS, MAX_MARKS, MAX_LIGHTS, LIGHT_KINDS, optionsOf } from './engine/scene.js';
 import { ATLAS_SLOTS } from './engine/sdf.wgsl.js';
 import { ASSETS, ASSET_GROUPS, ASSET_BY_ID } from './engine/assets.js';
 import { MARK_TYPES, MARK_ORDER, makeMark, motionOn } from './engine/marks.js';
-import { el } from './ui/dom.js';
+import { el, toggle } from './ui/dom.js';
 import { icon } from './ui/icons.js';
 import { TABS, scenePanel, fluidsPanel, windPanel, lightPanel, worldPanel, filtersPanel, dropToGround } from './ui/panels.js';
 import { History } from './history.js';
@@ -57,6 +60,7 @@ async function boot() {
     camera: { ...START_CAMERA },
   });
   app.vp = vp;
+  vp.display.box = false;
   try {
     await vp.init();
     if (saved) {
@@ -121,15 +125,35 @@ async function save() {
 }
 
 app.commit = () => {
-  const sel = app.vp.scene.selected;
-  if (sel && sel.kind === 'object') {
+  for (const sel of app.vp.movers()) {
+    if (sel.kind !== 'object') continue;
     const m = motionOn(sel.motion) ? motionAt(sel, app.vp.simTime) : null;
     sel.home = m ? { pos: sel.pos.map((v, k) => v - m.off[k]), rot: [sel.rot[0], sel.rot[1] - m.turn, sel.rot[2]] }
       : { pos: [...sel.pos], rot: [...sel.rot] };
   }
+  growBox();
   app.history.commit();
   app.dirty = true;
 };
+
+function growBox() {
+  const H = app.history, vp = app.vp, S = vp.scene;
+  if (!H || !H.stack[H.at]) return;
+  const prev = JSON.parse(H.stack[H.at]);
+  const was = new Map([...prev.objects, ...prev.emitters].map(d => [d.id, d]));
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b), movers = vp.movers();
+  const touched = [...S.objects, ...S.emitters].filter(it => {
+    const d = was.get(it.id);
+    if (!d) return true;
+    return movers.includes(it) && (!same(d.pos, it.pos) || (it.kind === 'object' ? !same(d.size, it.size) || !same(d.rot, it.rot) : d.radius !== it.radius));
+  });
+  const R = touched.length ? vp.boxToTake(touched) : null;
+  if (!R) return;
+  const names = [...new Set(touched.filter(it => !(it.kind === 'emitter' && it.attach)).map(it => it.name))];
+  app.setSimulation({ region: { size: R.size, center: R.center }, keep: true });
+  toast(R.clipped ? `The simulation box is at its largest (16 m a side), so part of ${names.join(', ')} is still outside it.`
+    : `The simulation box grew to ${R.size.map(v => v.toFixed(1)).join(' × ')} m to take in ${names.slice(0, 2).join(' and ')}${names.length > 2 ? ` and ${names.length - 2} more` : ''}.`, R.clipped);
+}
 app.markDirty = () => { app.dirty = true; };
 app.scenePanelList = () => { if (app.panels.scene && app.tab === 'scene') app.panels.scene.paintList(); };
 
@@ -158,8 +182,14 @@ function buildTop() {
   const undoGroup = el('div', { class: 'group' }, app.undoBtn, app.redoBtn);
   const fileGroup = el('div', { class: 'group' }, newBtn, tb('open', 'Open', 'Open a scene file (Ctrl+O)', () => $('scene-file').click()),
     tb('save', 'Save', 'Save the scene as a file (Ctrl+S). It is also kept in this browser automatically.', () => saveFile()));
+  app.showBtn = tb('eye', 'Show', 'What the view draws: the simulation box, sources, marks, smoke, liquid', () => toggleShow());
+  app.showBtn.setAttribute('aria-haspopup', 'menu');
+  $('show').replaceChildren(...[['box', 'Simulation box'], ['sources', 'Sources'], ['marks', 'Marks'], ['smoke', 'Smoke'], ['liquid', 'Liquid']]
+    .map(([k, label]) => toggle({ label, get: () => vp.display[k], set: v => { vp.display[k] = v; } })));
   const focus = ib('focus', 'Bring the camera to the selection (F)', () => vp.frameSelected());
   focus.dataset.label = 'Bring the camera to the selection';
+  app.cleanBtn = ib('clean', 'Clean scene: hide all the panels (G)', () => setClean(true));
+  app.cleanBtn.dataset.label = 'Clean scene';
   app.moreBtn = ib('more', 'More', () => toggleMore());
   app.moreBtn.setAttribute('aria-haspopup', 'menu');
   const sepUndo = el('span', { class: 'sep' }), sepFile = el('span', { class: 'sep' });
@@ -168,12 +198,21 @@ function buildTop() {
       ib('restart', 'Start again: empty the fluids and put moving objects back where they were put', () => { vp.resetFluids(); vp.putBack(); })),
     speedBox, app.timer,
     el('span', { class: 'spacer' }),
-    undoGroup, sepUndo, fileGroup, sepFile, view, focus, app.moreBtn,
+    undoGroup, sepUndo, fileGroup, sepFile, app.showBtn, view, focus, app.cleanBtn, app.moreBtn,
     el('span', { class: 'sep' }), app.infoBtn);
-  const order = new Map([speedBox, app.timer, undoGroup, fileGroup, view, focus].map((e, i) => [e, i]));
-  app.overflow = [[[focus], []], [[view], []], [[app.timer], []], [[fileGroup], [sepFile]], [[undoGroup], [sepUndo]], [[speedBox], []]]
+  const order = new Map([speedBox, app.timer, undoGroup, fileGroup, app.showBtn, view, focus, app.cleanBtn].map((e, i) => [e, i]));
+  app.overflow = [[[app.cleanBtn], []], [[focus], []], [[view], []], [[app.showBtn], []], [[app.timer], []], [[fileGroup], [sepFile]], [[undoGroup], [sepUndo]], [[speedBox], []]]
     .map(([els, hide]) => ({ els: els.map(e => { const m = document.createComment('top'); e.before(m); return { e, m }; }), hide }));
   app.overflowOrder = e => order.get(e);
+  const exit = el('button', { type: 'button', class: 'ib clean-exit', title: 'Bring the panels back (G)', 'aria-label': 'Bring the panels back', onclick: () => setClean(false) }, icon('clean'));
+  document.body.append(exit);
+  let asleep = 0;
+  addEventListener('pointermove', () => {
+    if (!app.clean) return;
+    exit.classList.add('awake');
+    clearTimeout(asleep);
+    asleep = setTimeout(() => exit.classList.remove('awake'), 1800);
+  });
   paintTop();
   fitTop();
   document.fonts.ready.then(fitTop);
@@ -213,6 +252,17 @@ function placeMore() {
   menu.style.right = `${Math.max(8, innerWidth - b.right)}px`;
 }
 
+function toggleShow(open = $('show').hidden) {
+  const menu = $('show');
+  menu.hidden = !open;
+  app.showBtn.classList.toggle('on', open);
+  if (!open) return;
+  for (const r of menu.children) if (r.paint) r.paint();
+  const from = app.showBtn.offsetParent ? app.showBtn : app.moreBtn, b = from.getBoundingClientRect();
+  menu.style.top = `${b.bottom + 10}px`;
+  menu.style.right = `${Math.max(8, innerWidth - b.right)}px`;
+}
+
 function toggleMore(open = $('more').hidden) {
   const menu = $('more');
   menu.hidden = !open;
@@ -228,7 +278,23 @@ function paintTop() {
   const playing = app.vp.playing;
   app.playBtn.replaceChildren(icon(playing ? 'pause' : 'play'));
   app.playBtn.title = playing ? 'Pause (Space)' : 'Play (Space)';
+  app.playBtn.classList.toggle('play-start', !playing);
+  app.playBtn.classList.toggle('play-stop', playing);
 }
+
+function setClean(on) {
+  const vp = app.vp;
+  if (app.clean === on) return;
+  app.clean = on;
+  vp.clean = on;
+  document.body.classList.toggle('clean', on);
+  if (!on) return;
+  vp.cancelDrag();
+  if (vp.placing) cancelPlacing();
+  $('flyout').hidden = true; $('info').hidden = true; $('ctx').hidden = true; toggleMore(false); toggleShow(false);
+  toast('Clean scene. G or Esc brings the panels back.');
+}
+app.setClean = setClean;
 
 function togglePlay() { app.vp.playing = !app.vp.playing; paintTop(); paintStatus(); }
 
@@ -274,7 +340,7 @@ function buildTools() {
     tool('lights', 'Lights', 'Lights you place: an area light, a point light or a spot light', e => { e.stopPropagation(); toggleFlyout('lights'); }, 'light'),
     tool('marks', 'Marks', 'Add live data and drawn elements: labels, timers, counters, a data panel, tracking boxes, lines, grids', e => { e.stopPropagation(); toggleFlyout('marks'); }),
     el('hr'),
-    tool('model', 'Model', 'Import your own 3D model: glTF/GLB, OBJ or STL (or drop a file on the window)', () => $('model-file').click()),
+    tool('model', 'Model', 'Import your own 3D model: GLB/glTF, FBX, USDZ, OBJ or STL (or drop a file on the window)', () => $('model-file').click()),
   ];
   tools.append(...app.toolButtons);
   for (const [k, label] of [['smoke', 'Smoke source'], ['liquid', 'Liquid source']]) draggable(app.toolButtons.find(b => b.dataset && b.dataset.tool === k), k, label, k);
@@ -437,12 +503,12 @@ const SOURCE_KINDS = new Set(['smoke', 'liquid', 'drain', 'extractor']);
 function placerFor(kind) {
   const vp = app.vp, S = vp.settings;
   const asset = kind.startsWith('asset:') ? ASSET_BY_ID[kind.slice(6)] : null;
-  return p => {
+  const place = p => {
     let made;
     if (kind === 'smoke') made = vp.scene.addEmitter({ type: 'smoke', pos: [p[0], p[1] + 0.22, p[2]], radius: 0.24, color: hexToRgb(S.smokeColor), dir: [0, 1, 0], speed: 0.6 });
     else if (kind === 'liquid') made = vp.scene.addEmitter({ type: 'liquid', pos: [p[0], Math.max(1.4, p[1] + 0.6), p[2]], radius: 0.08, color: hexToRgb(S.liquidColor), dir: [0, -1, 0], speed: 1.5 });
     else if (kind === 'drain') made = vp.scene.addEmitter({ type: 'liquid', sink: true, pos: [p[0], p[1] + 0.03, p[2]], radius: 0.15, rate: 1, dir: [0, 1, 0], speed: 0, color: [0.2, 0.21, 0.23] });
-    else if (kind === 'extractor') made = vp.scene.addEmitter({ type: 'smoke', sink: true, pos: [p[0], p[1] + 1.2, p[2]], radius: 0.3, rate: 1, dir: [0, 1, 0], speed: 0, color: [0.2, 0.21, 0.23] });
+    else if (kind === 'extractor') made = vp.scene.addEmitter({ type: 'smoke', sink: true, pos: [p[0], p[1] + 0.6, p[2]], radius: 0.3, rate: 1, dir: [0, 1, 0], speed: 0, color: [0.2, 0.21, 0.23] });
     else if (kind === 'light:area') made = vp.scene.addLight({ type: 'area', pos: [p[0], p[1] + 1.5, p[2]], dir: [0, -1, 0], radius: 0.4, aspect: 0.6, power: 6 });
     else if (kind === 'light:point') made = vp.scene.addLight({ type: 'point', pos: [p[0], p[1] + 1.0, p[2]], radius: 0.05, power: 3 });
     else if (kind === 'light:spot') made = vp.scene.addLight({ type: 'spot', pos: [p[0], p[1] + 2.0, p[2]], dir: [0, -1, 0], radius: 0.06, angle: 40, soft: 0.3, power: 12 });
@@ -454,9 +520,7 @@ function placerFor(kind) {
         try { r = vp.addAsset(asset.id, p, { on: p[1] }); } catch (e2) { toast(e2.message, true); return null; }
       }
       made = r && r.object;
-      if (r && asset.sources && r.sources.length < asset.sources.length) {
-        toast(`Added without ${asset.sources.length - r.sources.length > 1 ? 'some of its sources' : 'its source'}: a scene holds ${MAX_EMITTERS} sources.`, true);
-      }
+      if (r && r.waiting) toast(`${asset.label} added, but a scene holds ${MAX_EMITTERS} sources and they are all in use: it will start working when you delete one.`, true);
     } else {
       made = vp.scene.addObject({ shape: kind, pos: [p[0], 0, p[2]], color: hexToRgb(S.objectColor),
         moves: MOVES_BY_DEFAULT.has(kind), material: kind === 'ball' ? 'rubber' : 'wood' });
@@ -466,6 +530,8 @@ function placerFor(kind) {
       : kind.startsWith('light:') ? `A scene can hold ${MAX_LIGHTS} lights; delete one first.` : `A scene can hold ${MAX_OBJECTS} objects; delete one first.`, true);
     return made;
   };
+  place.lift = asset ? asset.lift || 0 : kind === 'extractor' ? 0.6 : 0;
+  return place;
 }
 
 function readyToAdd(kind) {
@@ -506,7 +572,7 @@ function draggable(b, kind, label, iconName) {
         paintTools();
       }
       ghost.style.transform = `translate(${ev.clientX}px, ${ev.clientY}px)`;
-      vp.dropPreview = inView(ev) ? vp.landingAt(...at(ev)) : null;
+      vp.dropPreview = inView(ev) ? vp.landingAt(...at(ev), placerFor(kind).lift) : null;
     };
     const end = (ev, drop) => {
       window.removeEventListener('pointermove', move);
@@ -559,6 +625,7 @@ function buildPanel() {
 
 function showTab(key) {
   app.tab = key;
+  if (app.showDecalHandles && app.panels) setTimeout(app.showDecalHandles);
   for (const b of $('tabs').children) {
     b.classList.toggle('on', b.dataset.tab === key);
     b.setAttribute('aria-selected', b.dataset.tab === key ? 'true' : 'false');
@@ -575,15 +642,21 @@ app.repaint = repaintPanel;
 
 
 function contextMenu(item, x, y) {
-  const menu = $('ctx');
+  const menu = $('ctx'), vp = app.vp;
   if (!item) { menu.hidden = true; return; }
-  if (app.vp.scene.selected !== item) app.vp.select(item);
+  const group = vp.selectedItems(), many = group.length > 1 && (group.includes(item) || vp.movers().includes(item));
+  if (!many && vp.scene.selected !== item) vp.select(item);
+  const items = many ? group : [item], n = many ? ' ' + items.length : '';
   const row = (name, text, key, action) => el('button', { type: 'button', class: 'tb', role: 'menuitem',
     onclick: () => { menu.hidden = true; action(); } }, icon(name, 18), el('span', { class: 'tx' }, text), el('span', { class: 'k' }, key));
+  const allHidden = items.every(hiddenOf);
   menu.replaceChildren(
-    row('copy', 'Duplicate', 'Ctrl D', () => app.duplicate(item)),
-    ...(item.kind !== 'mark' || item.pos ? [row('focus', 'Focus', 'F', () => app.vp.frameSelected())] : []),
-    row('trash', 'Delete', 'Del', () => app.remove(item)));
+    row('copy', 'Duplicate' + n, 'Ctrl D', () => app.duplicateAll(items)),
+    ...(!many && (item.kind !== 'mark' || item.pos) ? [row('focus', 'Focus', 'F', () => vp.frameSelected())] : []),
+    row(allHidden ? 'eye' : 'eyeOff', (allHidden ? 'Show' : 'Hide') + n, 'H', () => app.toggleHidden(items)),
+    ...(items.some(i => i.kind === 'object') ? [row('move', 'Put on the ground' + n, 'End', () => app.groundAll(items))] : []),
+    row('objects', 'Select all like this', '', () => app.selectLike(item)),
+    row('trash', 'Delete' + n, 'Del', () => app.removeAll(items)));
   menu.hidden = false;
   const r = menu.getBoundingClientRect();
   menu.style.left = `${Math.max(8, Math.min(x + 2, innerWidth - r.width - 8))}px`;
@@ -592,15 +665,54 @@ function contextMenu(item, x, y) {
 app.contextMenu = contextMenu;
 
 
-app.remove = item => {
+const hiddenOf = it => it.kind === 'light' ? it.show === false : !!it.hidden;
+app.toggleHidden = items => {
+  const hide = !items.every(hiddenOf);
+  for (const it of items) { if (it.kind === 'light') it.show = !hide; else if (hide) it.hidden = true; else delete it.hidden; }
+  app.vp.emit('change');
+  app.commit();
+};
+app.groundAll = items => {
+  for (const it of items) {
+    const o = app.vp.kitOf(it) || it;
+    if (o.kind !== 'object') continue;
+    const y = o.pos[1];
+    app.vp.dropToGround(o);
+    if (o.home) o.home.pos[1] += o.pos[1] - y;
+  }
+  app.vp.emit('change');
+  app.commit();
+};
+app.selectLike = it => {
+  const S = app.vp.scene, sort = x => x.kind === 'object' ? (x.asset || x.model || x.shape) : x.kind === 'emitter' ? `${x.type}|${!!x.sink}` : `${x.kind}|${x.type}`;
+  app.vp.selectAll(S.items.filter(x => x.kind === it.kind && sort(x) === sort(it)));
+};
+app.remove = item => app.removeAll([item]);
+app.removeAll = items => {
   const vp = app.vp;
-  vp.scene.remove(item);
-  if (vp.scene.selected === item) vp.select(null);
+  for (const it of items) vp.scene.remove(it);
+  vp.selectAll(vp.scene.picks);
   vp.emit('change');
   app.commit();
 };
 
-app.duplicate = item => {
+app.duplicate = item => app.duplicateAll([item]);
+app.duplicateAll = items => {
+  const vp = app.vp, done = [], copies = [];
+  for (const it of items) {
+    const item = vp.kitOf(it) || it;
+    if (done.includes(item)) continue;
+    done.push(item);
+    const c = copyOf(item);
+    if (!c) break;
+    copies.push(c);
+  }
+  if (!copies.length) return;
+  vp.selectAll(copies);
+  vp.emit('change');
+  app.commit();
+};
+function copyOf(item) {
   const vp = app.vp;
   let copy;
   const off = [0.4, 0, 0.4];
@@ -608,7 +720,8 @@ app.duplicate = item => {
     copy = vp.scene.addObject({ shape: item.shape, pos: item.pos.map((v, k) => v + off[k]), size: [...item.size], rot: [...item.rot],
       color: [...item.color], model: item.model, name: item.name + ' copy',
       moves: item.moves, collides: item.collides, material: item.material, finish: item.finish, motion: item.motion, asset: item.asset,
-      home: item.home ? { pos: item.home.pos.map((v, k) => v + off[k]), rot: [...item.home.rot] } : null });
+      whenInBox: item.whenInBox, home: item.home ? { pos: item.home.pos.map((v, k) => v + off[k]), rot: [...item.home.rot] } : null, ...optionsOf(item), ...lookData(item),
+      ...(item.partLooks ? { partLooks: item.partLooks.map(p => ({ color: [...p.color], finish: p.finish || null, ...lookData(p) })) } : {}) });
   } else if (item.kind === 'emitter') {
     copy = vp.scene.addEmitter({ type: item.type, pos: item.pos.map((v, k) => v + off[k]), radius: item.radius, color: [...item.color],
       dir: [...item.dir], speed: item.speed, rate: item.rate, on: item.on, heat: item.heat ?? 1, pulse: item.pulse, name: item.name + ' copy',
@@ -624,21 +737,19 @@ app.duplicate = item => {
     else if (d.pos) d.pos = d.pos.map((v, k) => v + off[k]);
     copy = vp.scene.addMark(d);
   }
-  if (!copy) { toast(`The scene is full: ${MAX_OBJECTS} objects, ${MAX_EMITTERS} sources, ${MAX_LIGHTS} lights and ${MAX_MARKS} marks at most.`, true); return; }
+  if (!copy) { toast(`The scene is full: ${MAX_OBJECTS} objects, ${MAX_EMITTERS} sources, ${MAX_LIGHTS} lights and ${MAX_MARKS} marks at most.`, true); return null; }
   if (item.kind === 'object') {
     const parts = vp.scene.emitters.filter(e => e.attach && e.attach.to === item.id);
     let left = 0;
     for (const e of parts) {
       const c = vp.scene.addEmitter({ type: e.type, pos: e.pos.map((v, k) => v + off[k]), radius: e.radius, color: [...e.color], dir: [...e.dir],
-        speed: e.speed, rate: e.rate, on: e.on, heat: e.heat ?? 1, pulse: e.pulse, sink: !!e.sink, attach: { to: copy.id }, name: e.name + ' copy' });
+        speed: e.speed, rate: e.rate, on: e.on, heat: e.heat ?? 1, pulse: e.pulse, sink: !!e.sink, attach: { to: copy.id, part: e.attach.part }, name: e.name + ' copy' });
       if (!c) left++;
     }
     if (left) toast(`Copied without ${left > 1 ? left + ' of its parts' : 'one of its parts'}: a scene holds ${MAX_EMITTERS} sources.`, true);
   }
-  vp.select(copy);
-  vp.emit('change');
-  app.commit();
-};
+  return copy;
+}
 
 app.setSimulation = async opts => {
   await app.vp.setSimulation(opts);
@@ -701,21 +812,52 @@ async function importModel(files) {
     const m = vp.scene.models.get(id);
     const size = m.prop.map(p => p * 0.5);
     const t = vp.camera.target;
+    const looks = await looksFromFile(parsed, (blob, name) => vp.addImage(blob, name));
+    const several = looks.length > 1;
+    const own = !several && looks[0] ? looks[0] : {};
     const o = vp.scene.addObject({ shape: 'model', model: id, name: parsed.name, pos: [t[0], 0, t[2]], size,
-      rot: parsed.zUp ? [-Math.PI / 2, 0, 0] : [0, 0, 0], color: parsed.color || hexToRgb('#c9c4bb') });
-    if (!o) { toast('The scene is full: 32 objects at most.', true); return; }
+      rot: parsed.zUp ? [-Math.PI / 2, 0, 0] : [0, 0, 0], color: own.color || parsed.color || hexToRgb('#c9c4bb'),
+      finish: own.finish || null, pbr: own.pbr, tex: own.tex, partLooks: several ? looks : null });
+    if (!o) { toast('The scene is full: 64 objects at most.', true); return; }
     dropToGround(vp, o);
     vp.select(o);
     vp.emit('change');
     app.commit();
     showTab('scene');
     app.waitingBake = true;
-    toast(`Added ${parsed.name}: ${fmtN(parsed.triangles)} triangles, 1 m across. Working out its shape for the fluids…`);
+    const notes = parsed.notes && parsed.notes.length ? ' ' + parsed.notes.join(' ') : '';
+    toast(`Added ${parsed.name}: ${fmtN(parsed.triangles)} triangles${several ? `, ${looks.length} parts` : ''}, 1 m across.${notes} Working out its shape for the fluids…`, !!notes);
     m.whenReady.then(() => { toast(`${parsed.name} is ready: the fluids now flow round it.`); app.panels.scene.paint(); });
   } catch (e) { console.error(e); toast('Could not import it: ' + e.message, true); }
 }
 
 app.pickImage = () => $('image-file').click();
+app.useBackground = file => { useImage(file); };
+app.keepImages = () => { app.vp.imagesKeep = () => app.history.imagesInUse(); };
+app.toast = (t, bad) => toast(t, bad);
+app.showTab = k => showTab(k);
+app.repaintAllPanels = () => { for (const p of Object.values(app.panels)) p.paint(); };
+app.showDecalHandles = () => {
+  const vp = app.vp, S = vp.scene;
+  let edit = null;
+  const pickOn = (look, owner) => { const d = look && look.decals && look.decals[look.decalPick ?? -1]; if (d) edit = { owner, decal: d }; };
+  if (app.tab === 'world') pickOn(vp.look.ground, null);
+  else if (S.selected && S.selected.kind === 'object' && vp.selectedItems().length === 1) {
+    const o = S.selected;
+    if (o.partLooks) for (const p of o.partLooks) pickOn(p, o); else pickOn(o, o);
+  }
+  vp.decalEdit = edit;
+  app.decalOwner = edit ? edit.owner : null;
+};
+app.smallMenu = (x, y, items) => {
+  const menu = $('ctx');
+  menu.replaceChildren(...items.map(([name, text, action]) => el('button', { type: 'button', class: 'tb', role: 'menuitem',
+    onclick: () => { menu.hidden = true; action(); } }, icon(name, 18), el('span', { class: 'tx' }, text))));
+  menu.hidden = false;
+  const r = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(x + 2, innerWidth - r.width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y + 2, innerHeight - r.height - 8))}px`;
+};
 
 app.applyImageColours = () => {
   const vp = app.vp;
@@ -764,7 +906,7 @@ function paintCompass() {
   const windAz = Math.atan2(w[0], w[2]) * 180 / Math.PI;
   const rot = north + windAz;
   svg.innerHTML = `<circle r="34" class="ring"/>
-    <g transform="rotate(${north})"><text y="-25" class="n">N</text></g>
+    ${Math.abs(((north % 360) + 360) % 360 - 180) < 32 ? '' : `<g transform="rotate(${north})"><text y="-25" class="n">N</text></g>`}
     <g transform="rotate(${rot})"><path class="arrow" d="M0 -22 L7 -6 L2 -8 L2 18 L-2 18 L-2 -8 L-7 -6 Z"/></g>
     <text y="31" class="spd">${speed.toFixed(1)} m/s</text>`;
 }
@@ -804,6 +946,7 @@ function paintInfo() {
         [el('span', {}, el('kbd', {}, 'Ctrl'), ' ', el('kbd', {}, 'D')), 'duplicate'], [el('span', {}, el('kbd', {}, 'Ctrl'), ' ', el('kbd', {}, 'Z')), 'undo'],
         [el('span', {}, el('kbd', {}, 'Ctrl'), ' ', el('kbd', {}, 'Y')), 'redo (or Ctrl Shift Z)'],
         [el('span', {}, el('kbd', {}, 'F')), 'bring the camera to the selection'], [el('span', {}, el('kbd', {}, 'Esc')), 'cancel a handle drag or placing'],
+        [el('span', {}, el('kbd', {}, 'G')), 'clean scene: hide all the panels; G or Esc brings them back'],
         [el('span', {}, el('kbd', {}, 'Ctrl'), ' ', el('kbd', {}, 'S')), 'save the scene as a file'], [el('span', {}, el('kbd', {}, 'Ctrl'), ' ', el('kbd', {}, 'O')), 'open a scene file']]
         .map(([a, b]) => el('tr', {}, el('td', {}, a), el('td', {}, b)))),
     el('h3', {}, 'The start scene'),
@@ -817,7 +960,11 @@ function paintInfo() {
     el('h3', {}, 'Physics'),
     el('p', {}, 'Objects with weight fall, stack and collide, and water and wind push them: light materials float, heavy ones sink. Drag one and let go to throw it; lifted with the handles it drops straight down when let go (pause first, with Space, to set things up in the air). Collision off lets objects and fluids pass through. The circular-arrow button starts everything again: fluids empty, moving objects back where they were put, timers and motions from the start.'),
     el('h3', {}, 'Objects'),
-    el('p', {}, 'To add a shape, an object or a source, drag its icon from the tools into the view: a ring shows where it will stand, on whatever is under the pointer (a table top, or the ground). Or click the icon, then the place. Ready-made pieces in the Objects tool: figures, a studio backdrop, light stands, a toothed ring, clear channels and a clear basin, lab stands, tubes, a ribbed panel, frosted balls, metal blocks, springs, a waffle base, posts, fences, model trees, slats, a frame, and kits that bring their own sources (a mist nozzle, a rail of four, a blower, a pour spout) or take fluid out (a floor drain, an extractor hood); the parts of a kit move, turn, copy and delete with it. Each has a colour and a finish (matte, gloss, metal, clear) in the Scene tab, with ready materials to pick from. Any object can move on its own (Motion) and any source can switch itself on and off (Timer).'),
+    el('p', {}, 'To add a shape, an object or a source, drag its icon from the tools into the view: a ring shows where it will stand, on whatever is under the pointer (a table top, or the ground). Or click the icon, then the place. Ready-made pieces in the Objects tool: figures, a studio backdrop, light stands, a toothed ring, clear channels and a clear basin, lab stands, tubes, a ribbed panel, frosted balls, metal blocks, springs, a waffle base, posts, fences, model trees, slats, a frame, and kits that bring their own sources (a mist nozzle, a rail of four, a blower, a pour spout) or take fluid out (a floor drain, an extractor hood); the parts of a kit move, turn, copy and delete with it. Any object can move on its own (Motion) and any source can switch itself on and off (Timer).'),
+    el('h3', {}, 'Materials'),
+    el('p', {}, 'Click a thing: its Material settings are in the Scene tab. Roughness, Metallic, Specular, Clear coat, Glow and Grain are sliders; click a value to type it. The Finish buttons and Ready materials are shortcuts to them; Clear and Frosted make it glass, with Roughness, Refraction and Tint depth. An imported model\'s parts each have their own: click a part of a selected model to choose it, or use the Part row.'),
+    el('h3', {}, 'Pictures on things'),
+    el('p', {}, 'Drag an image from a folder onto a thing in the view, or onto the floor. A box asks Texture (all over it, and as what: colour, roughness, metallic, bump, normal, displacement or opacity) or Decal (on that one place). Or use the small squares in the Material settings. The Texture settings say how it lies: box, flat, cylinder, ball or the model\'s own layout, tile size, repeat, rotation, position. Choose a decal in the Decals settings and drag it in the view; its corners size it and its dot turns it. The floor\'s are in the World tab. Displacement changes what you see and the shadow; the fluids flow round the original shape. Up to 24 pictures in a scene, each held at 2048 by 2048.'),
     el('h3', {}, 'Taking water and smoke out'),
     el('p', {}, 'Click the Liquid tool for a Drain, the Smoke tool for an Extractor (dragging the button itself still adds a source). A drain pulls the water round it in and it is gone; an extractor draws the air round it in, and the smoke with it, like a kitchen hood. Strength and size are in the Scene tab: at 1, a drain as big as the tool makes it takes about what a liquid source pours, and an extractor draws the air beside it at about 0.3 m/s. Put an extractor right over the smoke: beside it, a stronger pull draws more smoke out of a strong source.'),
     el('h3', {}, 'Lights'),
@@ -825,9 +972,9 @@ function paintInfo() {
     el('h3', {}, 'Marks'),
     el('p', {}, 'Live data and drawn elements over the view, in the Marks tool: text, a timer, a counter, a panel of live numbers, a legend of the sources, labels that follow things, numbered tracking boxes, lines between things, wire grids and outlines. Text can show live numbers in braces, such as {timecode} or {height}. Marks stay sharp over the filters.'),
     el('h3', {}, 'Filters'),
-    el('p', {}, 'The Filters tab works on the finished picture like a photo editor: colour, tint, posterize, grain, scan lines, vignette, soften, glow, colour split, ink lines and a sharp band for a miniature look, with ready-made filters to start from. Saved with the scene.'),
+    el('p', {}, 'The Filters tab works on the finished picture like a photo editor. Film looks, each after one of Fujifilm\'s film simulations (named in its tooltip; made by hand, not measured against a camera), with highlights, shadows, colour, warmth, clarity, sharpen and grain over them. Diffusion and bloom spread light from bright parts, as the filter in the Ricoh GR III HDF does: a lamp spreads further than a white wall. And colour, tint, posterize, scan lines, vignette, soften, colour split, ink lines and a sharp band for a miniature look. Saved with the scene.'),
     el('h3', {}, 'Your own models'),
-    el('p', {}, `glTF or GLB (best), OBJ, or STL. Use the Model tool or drop the file on the window. FBX, USD and compressed glTF cannot be read: export glTF or OBJ from Blender or Houdini instead. Up to ${ATLAS_SLOTS} different models (library objects count) and ${MAX_OBJECTS} objects in a scene.`),
+    el('p', {}, `GLB or glTF, FBX, USDZ (or USD, USDC, USDA), OBJ with its MTL, or STL. Use the Model tool or drop the file on the window; pick an OBJ or FBX together with its pictures. Each part keeps its material and pictures. Compressed glTF, and skinning and animation in any file, are not read. Up to ${ATLAS_SLOTS} different models (library objects count) and ${MAX_OBJECTS} objects in a scene.`),
     el('h3', {}, 'The panels'),
     el('p', {}, 'The panels are clear glass that follows the picture: light glass over a light scene, dark glass over a dark one, so their text stays readable.'),
     el('h3', {}, 'Saving'),
@@ -864,11 +1011,18 @@ app.toast = toast;
 
 function wire() {
   const vp = app.vp;
-  vp.on('select', () => { if (app.panels.scene) { if (app.tab !== 'scene' && vp.scene.selected) showTab('scene'); else if (app.tab === 'scene') app.panels.scene.paint(); } });
+  app.keepImages();
+  vp.on('select', () => {
+    const was = app.decalOwner, now = vp.scene.selected;
+    if (was && was !== now) for (const l of was.partLooks || [was]) l.decalPick = -1;
+    if (app.panels.scene) { if (app.tab !== 'scene' && vp.scene.selected) showTab('scene'); else if (app.tab === 'scene') app.panels.scene.paint(); }
+    app.showDecalHandles();
+  });
   vp.on('change', () => { if (app.tab === 'scene') app.panels.scene.paint(); });
   vp.on('commit', () => app.commit());
   vp.on('moving', () => { if (app.tab === 'scene') app.panels.scene.paintLight(); });
   vp.on('placed', () => cancelPlacing());
+  vp.on('notice', text => toast(text, true));
   vp.on('region', () => { if (app.tab === 'fluids') app.panels.fluids.paint(); });
   vp.on('region-done', () => app.markDirty());
   vp.on('activate', () => {
@@ -883,22 +1037,36 @@ function wire() {
     const t = e.target.closest('[data-tool]');
     if (!e.target.closest('#flyout') && !(t && FLYOUTS.has(t.dataset.tool))) $('flyout').hidden = true;
     if (!$('more').hidden && !e.target.closest('#more') && !app.moreBtn.contains(e.target)) toggleMore(false);
+    if (!$('show').hidden && !e.target.closest('#show') && !app.showBtn.contains(e.target)) toggleShow(false);
   });
   document.addEventListener('pointerdown', e => { if (!$('ctx').hidden && !e.target.closest('#ctx')) $('ctx').hidden = true; }, true);
   vp.on('context', ({ item, x, y }) => contextMenu(item, x, y));
 
   let depth = 0;
-  window.addEventListener('dragenter', e => { if (e.dataTransfer.types.includes('Files')) { depth++; $('drop').hidden = false; e.preventDefault(); } });
-  window.addEventListener('dragover', e => e.preventDefault());
-  window.addEventListener('dragleave', () => { depth = Math.max(0, depth - 1); if (!depth) $('drop').hidden = true; });
+  const imagesOnly = e => [...e.dataTransfer.items].filter(i => i.kind === 'file').every(i => i.type.startsWith('image/'));
+  const endDrag = () => { depth = 0; $('drop').hidden = true; vp.dropHover = null; };
+  window.addEventListener('dragenter', e => { if (e.dataTransfer.types.includes('Files')) { depth++; $('drop').hidden = imagesOnly(e); e.preventDefault(); } });
+  window.addEventListener('dragover', e => {
+    e.preventDefault();
+    if (!e.dataTransfer.types.includes('Files') || !imagesOnly(e)) return;
+    const t = vp.surfaceAt(e.clientX, e.clientY);
+    vp.dropHover = t && t.kind === 'object' ? { item: t.item, part: t.part } : null;
+  });
+  window.addEventListener('dragleave', () => { depth = Math.max(0, depth - 1); if (!depth) endDrag(); });
+  window.addEventListener('dragend', endDrag);
   window.addEventListener('drop', e => {
     e.preventDefault();
-    depth = 0;
-    $('drop').hidden = true;
+    endDrag();
     const files = [...e.dataTransfer.files];
     const scene = files.find(f => /\.(cloudtank|fluidsim|json)$/i.test(f.name));
+    const model = files.find(f => /\.(glb|gltf|obj|stl|fbx|usdz|usda|usdc|usd)$/i.test(f.name));
     if (scene) openFile(scene);
-    else if (files.length) importModel(files);
+    else if (model) importModel(files);
+    else if (files.length && files.some(isImageFile)) {
+      if (e.target.closest && e.target.closest('.glass')) toast('Drop it on a thing in the view, or on the floor.', true);
+      else imageMenu(app, files, e.clientX, e.clientY);
+    }
+    else if (files.length) toast('This app takes models, scenes and images. ' + files[0].name + ' is none of those.', true);
   });
 
   document.addEventListener('keydown', e => {
@@ -907,18 +1075,27 @@ function wire() {
     if (ctrl && e.key.toLowerCase() === 's') { e.preventDefault(); saveFile(); return; }
     if (ctrl && e.key.toLowerCase() === 'o') { e.preventDefault(); $('scene-file').click(); return; }
     if (typing) return;
+    if (app.clean) {
+      if (e.key === 'Escape' || (e.key.toLowerCase() === 'g' && !ctrl && !e.altKey)) setClean(false);
+      else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+      return;
+    }
     if (ctrl && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
     if (ctrl && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
-    if (ctrl && e.key.toLowerCase() === 'd') { e.preventDefault(); if (vp.scene.selected) app.duplicate(vp.scene.selected); return; }
+    if (ctrl && e.key.toLowerCase() === 'd') { e.preventDefault(); if (vp.scene.selected) app.duplicateAll(vp.selectedItems()); return; }
+    if (ctrl && e.key.toLowerCase() === 'a') { e.preventDefault(); vp.selectAll(vp.scene.items); return; }
+    if (e.key === 'End') { e.preventDefault(); if (vp.scene.selected) app.groundAll(vp.selectedItems()); return; }
     if (e.key === ' ') { e.preventDefault(); togglePlay(); return; }
-    if (e.key === 'Delete' || e.key === 'Backspace') { if (vp.scene.selected) app.remove(vp.scene.selected); return; }
+    if (e.key === 'Delete' || e.key === 'Backspace') { if (vp.scene.selected) app.removeAll(vp.selectedItems()); return; }
     if (e.key === 'Escape') {
       if (vp.cancelDrag()) return;
       if (vp.placing) cancelPlacing(); else if (app.tool === 'stir') setTool('move'); else vp.select(null);
-      $('flyout').hidden = true; $('info').hidden = true; $('ctx').hidden = true; toggleMore(false); return;
+      $('flyout').hidden = true; $('info').hidden = true; $('ctx').hidden = true; toggleMore(false); toggleShow(false); return;
     }
     if (ctrl || e.altKey) return;
     if (e.key.toLowerCase() === 'f') { vp.frameSelected(); return; }
+    if (e.key.toLowerCase() === 'g') { setClean(true); return; }
+    if (e.key.toLowerCase() === 'h') { if (vp.scene.selected) app.toggleHidden(vp.selectedItems()); return; }
     const handles = { w: 'move', e: 'turn', r: 'size' }[e.key.toLowerCase()];
     if (handles) { setTool(handles); return; }
   });

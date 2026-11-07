@@ -13,10 +13,12 @@ export const MATERIALS = {
 
 export const MOVES_BY_DEFAULT = new Set(['box', 'ball', 'cone', 'ring']);
 
-const G = 9.81;
+let G = 9.81;
+export function setGravity(v) { G = v; }
+export const blocksFluid = o => o.blocksFluid ?? (o.collides !== false);
 const WATER = 1000, AIR = 1.2;
 const ITER = 12;
-const SLOP = 0.004, BETA = 0.25, MARGIN = 0.01;
+const SLOP = 0.001, BETA = 0.25, MARGIN = 0.01;
 const SLEEP_V = 0.06, SLEEP_W = 0.1, SLEEP_T = 0.6;
 
 const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -87,7 +89,7 @@ class Body {
   rebuild(scene) {
     const o = this.o, model = o.model ? scene.models.get(o.model) : null;
     if (o.model && !model) return;
-    const key = `${o.shape}|${o.model}|${o.size.join(',')}|${o.material}|${model && model.field ? 1 : 0}`;
+    const key = `${o.shape}|${o.model}|${o.size.join(',')}|${o.material}|${model && model.field ? 1 : 0}|${o.massKg || 0}|${o.bounce ?? ''}|${o.grip ?? ''}`;
     if (key === this.key) return;
     this.key = key;
     const mat = MATERIALS[o.material] || MATERIALS.wood;
@@ -99,12 +101,12 @@ class Body {
     }
     const cellV = 8 * s[0] * s[1] * s[2] / (n * n * n);
     this.volume = Math.max(inside * cellV, 1e-5);
-    this.mass = mat.density * this.volume;
-    const k = mat.density * cellV;
+    this.mass = o.massKg > 0 ? o.massKg : mat.density * this.volume;
+    const k = this.mass / this.volume * cellV;
     const I = [Math.max(ixx * k, 1e-6), Math.max(iyy * k, 1e-6), Math.max(izz * k, 1e-6)];
     this.invI = I.map(v => 1 / v);
-    this.friction = mat.friction;
-    this.bounce = mat.bounce;
+    this.friction = o.grip ?? mat.friction;
+    this.bounce = o.bounce ?? mat.bounce;
     this.radius = Math.hypot(...s);
     this.samples = surfacePoints(scene.meshOf(o), s);
     this.vol = [];
@@ -203,7 +205,7 @@ export class Physics {
         this.wakeNear(b);
       }
       if (!o.moves) { b.v = [0, 0, 0]; b.w = [0, 0, 0]; }
-      const flags = `${o.moves}|${o.collides}|${o.material}`;
+      const flags = `${o.moves}|${o.collides}|${o.material}|${o.noGravity || 0}|${blocksFluid(o)}`;
       if (b.flags !== undefined && b.flags !== flags) { b.wake(); this.wakeNear(b); }
       b.flags = flags;
     }
@@ -221,7 +223,7 @@ export class Physics {
     const all = [...this.bodies.values()];
     if (wind) {
       for (const b of all) {
-        if (b.asleep && b.dynamic && b.o.collides !== false && len(this.windForce(b, wind).f) > 0.05 * G * b.mass) b.wake();
+        if (b.asleep && b.dynamic && blocksFluid(b.o) && len(this.windForce(b, wind).f) > 0.05 * G * b.mass) b.wake();
       }
     }
     const h = dt / steps;
@@ -263,9 +265,9 @@ export class Physics {
     }
     const moving = all.filter(b => b.free);
     for (const b of moving) {
-      let f = [0, -G * b.mass, 0], t = [0, 0, 0];
-      const wet = b.o.collides !== false ? this.buoyancy(b) : null;
-      if (wind && b.o.collides !== false) {
+      let f = [0, b.o.noGravity ? 0 : -G * b.mass, 0], t = [0, 0, 0];
+      const wet = blocksFluid(b.o) ? this.buoyancy(b) : null;
+      if (wind && blocksFluid(b.o)) {
         const w = this.windForce(b, wind);
         f = add(f, w.f); t = add(t, w.t);
       }
@@ -277,6 +279,8 @@ export class Physics {
       }
       b.v = add(b.v, mul(f, h / mEff));
       b.w = add(b.w, b.applyInvI(mul(t, h * b.mass / mEff)));
+      if (b.o.linDamp > 0) b.v = mul(b.v, Math.exp(-b.o.linDamp * h));
+      if (b.o.angDamp > 0) b.w = mul(b.w, Math.exp(-b.o.angDamp * h));
       if (wet && wet.frac > 0) {
         const rel = sub(b.v, wet.flow);
         const area = Math.pow(b.volume, 2 / 3);

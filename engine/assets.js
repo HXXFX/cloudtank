@@ -381,6 +381,22 @@ function funnel() {
   shell(P, N, [[0.009, 0], [0.009, 0.12], [0.06, 0.2], [0.062, 0.205]], 0.003, 40);
   return done('Pour spout', P, N);
 }
+function bell() {
+  const P = [], N = [];
+  lathe(P, N, [[0.15, 0], [0.15, 0.02], [0.05, 0.1], [0.04, 0.16], [0, 0.16], [0, 0.155], [0.035, 0.155], [0.045, 0.1],
+    [0.145, 0.02], [0.145, 0], [0.15, 0]], 40);
+  return done('Extractor hood', P, N);
+}
+function funnelCone() {
+  const P = [], N = [];
+  shell(P, N, [[0.009, 0], [0.06, 0.08], [0.062, 0.085]], 0.003, 40);
+  return done('Pour spout', P, N);
+}
+function funnelWide() {
+  const P = [], N = [];
+  shell(P, N, [[0.018, 0], [0.12, 0.16], [0.124, 0.17]], 0.006, 40);
+  return done('Pour spout', P, N);
+}
 function pendant() {
   const P = [], N = [];
   disc(P, N, 0.03, 0.25, true, 24); lathe(P, N, [[0.03, 0.245], [0.03, 0.25]], 24); disc(P, N, 0.03, 0.245, false, 24);
@@ -473,27 +489,27 @@ export const ASSETS = [
   { id: 'lab-stand', group: 'Table top', label: 'Stand', icon: 'labStand', mesh: labStand, color: '#0f7a30', finish: 'gloss' },
   { id: 'tube', group: 'Table top', label: 'Tube', icon: 'tube', shape: 'column', size: [0.045, 0.35, 0.045], rot: [PI / 2, 0, 0], color: '#efd3c9', finish: 'gloss' },
   { id: 'ribbed', group: 'Table top', label: 'Ribbed panel', icon: 'ribbed', mesh: ribbed, color: '#efd3c9', finish: 'gloss' },
-  { id: 'frosted-ball', group: 'Table top', label: 'Frosted ball', icon: 'frosted', shape: 'ball', size: [0.07, 0.07, 0.07], color: '#ffffff', finish: 'glass', moves: true, material: 'plastic' },
+  { id: 'frosted-ball', group: 'Table top', label: 'Frosted ball', icon: 'frosted', shape: 'ball', size: [0.07, 0.07, 0.07], color: '#ffffff', finish: 'frosted', moves: true, material: 'plastic' },
   { id: 'metal-block', group: 'Table top', label: 'Metal block', icon: 'block', shape: 'box', size: [0.09, 0.05, 0.07], color: '#7d8289', finish: 'metal', moves: true, material: 'metal' },
-  { id: 'spring', group: 'Table top', label: 'Spring', icon: 'spring', mesh: spring, color: '#b9bdc2', finish: 'metal' },
+  { id: 'spring', group: 'Table top', label: 'Spring', icon: 'spring', mesh: spring, color: '#b9bdc2', finish: 'metal', porous: true },
 
-  { id: 'waffle', group: 'Model making', label: 'Waffle base', icon: 'waffle', mesh: waffle, color: '#c48e58', finish: 'matte' },
+  { id: 'waffle', group: 'Model making', label: 'Waffle base', icon: 'waffle', mesh: waffle, color: '#c48e58', finish: 'matte', porous: true },
   { id: 'post', group: 'Model making', label: 'Post', icon: 'post', shape: 'column', size: [0.018, 0.5, 0.018], color: '#d9ea1c', finish: 'gloss' },
-  { id: 'fence', group: 'Model making', label: 'Fence', icon: 'fence', mesh: slimFence, design: 2, before: { 1: fence }, color: '#d9ea1c', finish: 'gloss' },
+  { id: 'fence', group: 'Model making', label: 'Fence', icon: 'fence', mesh: slimFence, design: 2, before: { 1: fence }, color: '#d9ea1c', finish: 'gloss', porous: true },
   { id: 'tree', group: 'Model making', label: 'Model tree', icon: 'tree', mesh: coneTree, design: 2, before: { 1: tree }, color: '#a9bf93', finish: 'matte' },
-  { id: 'slats', group: 'Model making', label: 'Slats', icon: 'slats', mesh: slats, color: '#f3c8a8', finish: 'gloss' },
+  { id: 'slats', group: 'Model making', label: 'Slats', icon: 'slats', mesh: slats, color: '#f3c8a8', finish: 'gloss', porous: true },
   { id: 'frame', group: 'Model making', label: 'Frame', icon: 'frame', mesh: thinFrame, design: 2, before: { 1: frame }, color: '#e9e9e9', finish: 'matte' },
 
   { id: 'nozzle', group: 'Fluid kits', label: 'Mist nozzle', icon: 'nozzle', mesh: pendant, design: 2, before: { 1: nozzle }, color: '#2a2a2a', finish: 'matte', lift: 2,
-    sources: [mist([0, -0.1, 0])] },
+    sources: [mist([0, -0.01, 0])] },
   { id: 'nozzle-rail', group: 'Fluid kits', label: 'Nozzle rail', icon: 'rail', mesh: roundRail, design: 2, before: { 1: nozzleRail }, color: '#2a2a2a', finish: 'matte', lift: 2.2,
-    sources: [-0.6, -0.2, 0.2, 0.6].map(x => mist([x, -0.09, 0], { radius: 0.07 })) },
-  { id: 'pour', group: 'Fluid kits', label: 'Pour spout', icon: 'pour', mesh: funnel, design: 2, before: { 1: spout }, color: '#e8e8e6', finish: 'gloss', lift: 1.1,
-    sources: [{ type: 'liquid', at: [0, -0.07, 0], dir: [0, -1, 0], radius: 0.05, speed: 1.2, rate: 1, color: '#2a8de8' }] },
+    sources: [-0.6, -0.2, 0.2, 0.6].map(x => mist([x, -0.01, 0], { radius: 0.07 })) },
+  { id: 'pour', group: 'Fluid kits', label: 'Pour spout', icon: 'pour', mesh: funnelWide, design: 4, before: { 1: spout, 2: funnel, 3: funnelCone }, color: '#e8e8e6', finish: 'gloss', lift: 1.1,
+    sources: [{ type: 'liquid', at: [0, -0.01, 0], dir: [0, -1, 0], radius: 0.05, speed: 1.2, rate: 1, color: '#2a8de8' }] },
   { id: 'floor-drain', group: 'Fluid kits', label: 'Floor drain', icon: 'floorDrain', mesh: gridDrain, design: 2, before: { 1: floorDrain }, color: '#9aa0a8', finish: 'metal', collides: false,
     sources: [{ type: 'liquid', sink: true, at: [0, 0.03, 0], dir: [0, 1, 0], radius: 0.15, rate: 1 }] },
-  { id: 'hood', group: 'Fluid kits', label: 'Extractor hood', icon: 'hood', mesh: snorkel, design: 2, before: { 1: hood }, color: '#c9ccd1', finish: 'metal', lift: 1,
-    sources: [{ type: 'smoke', sink: true, at: [0, 0.045, 0], dir: [0, 1, 0], radius: 0.16, rate: 2 }] },
+  { id: 'hood', group: 'Fluid kits', label: 'Extractor hood', icon: 'hood', mesh: bell, design: 3, before: { 1: hood, 2: snorkel }, color: '#c9ccd1', finish: 'metal', lift: 0.6,
+    sources: [{ type: 'smoke', sink: true, at: [0, 0.045, 0], dir: [0, 1, 0], radius: 0.3, rate: 2 }] },
 ];
 
 export const ASSET_BY_ID = Object.fromEntries(ASSETS.map(a => [a.id, a]));
@@ -515,7 +531,7 @@ export function assetModel(id, design = designOf(id)) {
   return made[key];
 }
 
-export const OBJECT_FINISHES = [['plain', 'Plain'], ['matte', 'Matte'], ['gloss', 'Gloss'], ['metal', 'Metal'], ['glass', 'Clear']];
+export const OBJECT_FINISHES = [['plain', 'Plain'], ['matte', 'Matte'], ['gloss', 'Gloss'], ['metal', 'Metal'], ['glass', 'Clear'], ['frosted', 'Frosted']];
 
 export const SWATCHES = [
   { label: 'Plaster', color: '#f1efea', finish: 'matte' },
@@ -529,7 +545,7 @@ export const SWATCHES = [
   { label: 'Steel', color: '#7d8289', finish: 'metal' },
   { label: 'Aluminium', color: '#b9bdc2', finish: 'metal' },
   { label: 'Acrylic', color: '#d6f3f7', finish: 'glass' },
-  { label: 'Frosted', color: '#ffffff', finish: 'glass' },
+  { label: 'Frosted', color: '#ffffff', finish: 'frosted' },
   { label: 'Graphite', color: '#2a2c30', finish: 'matte' },
   { label: 'Figure grey', color: '#2a3122', finish: 'matte' },
 ];

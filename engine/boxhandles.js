@@ -96,6 +96,20 @@ export function drawLanding(ctx, cam, p, W, H) {
   ctx.beginPath(); ctx.arc(foot[0], foot[1], 3.5, 0, Math.PI * 2); ctx.fillStyle = BOX_BLUE; ctx.fill();
 }
 
+export function drawReach(ctx, e, cam, W, H) {
+  const c = project(cam, e.pos, W, H), edge = project(cam, [e.pos[0] + cam.right[0] * e.radius, e.pos[1] + cam.right[1] * e.radius, e.pos[2] + cam.right[2] * e.radius], W, H);
+  if (c[2] <= 0 || edge[2] <= 0) return;
+  const r = Math.hypot(edge[0] - c[0], edge[1] - c[1]);
+  if (r < 2) return;
+  ctx.save();
+  ctx.setLineDash([5, 4]);
+  for (const [width, color] of [[3, 'rgba(255, 255, 255, 0.55)'], [1.5, e.sink ? 'rgba(20, 24, 28, 0.9)' : BOX_BLUE]]) {
+    ctx.beginPath(); ctx.arc(c[0], c[1], r, 0, Math.PI * 2);
+    ctx.lineWidth = width; ctx.strokeStyle = color; ctx.stroke();
+  }
+  ctx.restore();
+}
+
 export function drawBox(ctx, R, cam, W, H, { handles = true, hot = null, readout = null, mouse = null } = {}) {
   const b = regionBox(R);
   const corner = i => [(i & 1 ? b.max : b.min)[0], (i & 2 ? b.max : b.min)[1], (i & 4 ? b.max : b.min)[2]];

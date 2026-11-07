@@ -2,14 +2,13 @@ import { el, slider, numbers, color, choice, toggle, dial, section, button, repa
 import { icon } from './icons.js';
 import { SHAPES } from '../engine/shapes.js';
 import { LIGHT_PRESETS, BACKGROUNDS, FINISHES, GROUND_PATTERNS, patternOf, copy } from '../engine/environment.js';
-import { DETAIL, gridFor, MAX_SMOKE_CELLS, MAX_LIQUID_CELLS, MAX_PARTICLES, REGION_LIMITS, motionAt } from '../engine/viewport.js';
-import { MATERIALS } from '../engine/physics.js';
-import { sourceLabel, LIGHT_KINDS } from '../engine/scene.js';
-import { hexToRgb, rgbToHex } from '../engine/settings.js';
-import { fromAngles } from '../engine/math.js';
-import { ASSET_BY_ID, OBJECT_FINISHES, SWATCHES } from '../engine/assets.js';
+import { DETAIL, gridFor, MAX_SMOKE_CELLS, MAX_LIQUID_CELLS, MAX_PARTICLES, REGION_LIMITS } from '../engine/viewport.js';
+import { sourceLabel, LIGHT_KINDS, MAX_EMITTERS } from '../engine/scene.js';
+import { hexToRgb, rgbToHex, SETTINGS as FLUID_SETTINGS } from '../engine/settings.js';
+import { ASSET_BY_ID } from '../engine/assets.js';
+import { categoriesFor, category, filterRows, groundCategories } from './details.js';
 import { MARK_TYPES, LIVE, COUNTS, motionOn } from '../engine/marks.js';
-import { FILTER_PRESETS, POST_DEFAULTS } from '../engine/post.wgsl.js';
+import { FILTER_PRESETS, POST_DEFAULTS, FILM_LOOKS, DIFFUSIONS } from '../engine/post.wgsl.js';
 
 const DEG = 180 / Math.PI;
 const fmtN = n => Math.round(n).toLocaleString('en-US');
@@ -32,40 +31,96 @@ export function itemIcon(it) {
 
 const swatchOf = it => it.kind === 'mark' ? (it.color || '#ffffff') : rgbToHex(it.color);
 
+const isHiddenThing = it => it.kind === 'light' ? it.show === false : !!it.hidden;
+const KIND_WORD = { object: 'object', emitter: 'source', light: 'light', mark: 'mark' };
+
 export function scenePanel(app) {
   const vp = app.vp;
   const root = el('div');
-  const list = el('div', { class: 'list', role: 'listbox', 'aria-label': 'In the scene' });
+  const find = el('input', { class: 'find', type: 'search', placeholder: 'Search the scene', 'aria-label': 'Search the scene', spellcheck: 'false' });
+  const list = el('div', { class: 'list', role: 'listbox', 'aria-label': 'In the scene', 'aria-multiselectable': 'true' });
   const count = el('small');
   const props = el('div');
-  root.append(section(null, el('h3', {}, 'In the scene', count), list), props);
+  const grip = el('div', { class: 'split', role: 'separator', 'aria-orientation': 'horizontal', title: 'Drag: more or less room for the list' }, el('i'));
+  root.append(section(null, el('h3', {}, 'In the scene', count), find, list, grip), props);
 
-  let shown = null;
-  const paintList = () => {
-    const keep = list.scrollTop;
-    list.textContent = '';
-    const items = vp.scene.items;
-    const S = vp.scene;
-    count.textContent = `${S.objects.length} objects · ${S.emitters.length} sources` + (S.lights.length ? ` · ${S.lights.length} lights` : '') + (S.marks.length ? ` · ${S.marks.length} marks` : '');
-    if (!items.length) list.append(el('div', { class: 'empty' }, 'Empty. Add shapes, objects, sources, lights or marks from the tools on the left.'));
-    for (const it of items) {
-      const on = it === vp.scene.selected;
-      const off = (it.kind === 'emitter' || it.kind === 'light') && it.on === false;
-      const row = el('div', { class: 'item' + (on ? ' on' : '') + (off ? ' off' : ''), role: 'option', 'aria-selected': on ? 'true' : 'false' },
-        icon(itemIcon(it), 18),
-        el('span', { class: 'nm' }, it.name + (off ? ' (off)' : '')),
-        el('span', { class: 'sw', style: `background:${swatchOf(it)}` }),
-        el('button', { type: 'button', class: 'ib', title: 'Delete', 'aria-label': 'Delete ' + it.name,
-          onclick: e => { e.stopPropagation(); app.remove(it); } }, icon('trash', 16)));
-      row.addEventListener('click', () => vp.select(it));
-      row.addEventListener('dblclick', () => { vp.select(it); vp.frameSelected(); });
-      row.addEventListener('contextmenu', e => { e.preventDefault(); app.contextMenu(it, e.clientX, e.clientY); });
-      list.append(row);
+  try { const h = +localStorage.getItem('cloudtank.listH'); if (h >= 90) list.style.maxHeight = `${h}px`; } catch {   }
+  grip.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    const y0 = e.clientY, h0 = list.getBoundingClientRect().height;
+    const move = ev => { list.style.maxHeight = `${Math.max(90, Math.min(innerHeight * 0.7, h0 + ev.clientY - y0))}px`; };
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
+      try { localStorage.setItem('cloudtank.listH', parseFloat(list.style.maxHeight)); } catch {   } };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  });
+
+  const tree = () => {
+    const S = vp.scene, q = find.value.trim().toLowerCase();
+    const hit = it => !q || `${it.name} ${KIND_WORD[it.kind]} ${it.kind === 'emitter' ? sourceLabel(it) : ''}`.toLowerCase().includes(q);
+    const loose = S.emitters.filter(e => !e.attach || !S.objects.some(o => o.id === e.attach.to));
+    const groups = [];
+    for (const [title, things] of [['Objects', S.objects], ['Sources', loose], ['Lights', S.lights], ['Marks', S.marks]]) {
+      const rows = [];
+      for (const it of things) {
+        const parts = it.kind === 'object' ? S.emitters.filter(e => e.attach && e.attach.to === it.id) : [];
+        const own = hit(it), kept = own ? parts : parts.filter(hit);
+        if (own || kept.length) { rows.push({ it, depth: 0 }); for (const e of kept) rows.push({ it: e, depth: 1 }); }
+      }
+      if (rows.length) groups.push({ title, rows });
     }
-    list.scrollTop = keep;
-    const sel = list.querySelector('.item.on');
-    if (vp.scene.selected !== shown && list.isConnected) {
-      shown = vp.scene.selected;
+    return groups;
+  };
+
+  let anchor = null;
+  const clickRow = (e, it) => {
+    const S = vp.scene;
+    if (e.shiftKey) {
+      const rows = tree().flatMap(g => g.rows).map(r => r.it);
+      const from = rows.find(i => i.id === anchor && S.isPicked(i)) || S.selected || it;
+      const a = Math.max(rows.indexOf(from), 0), b = rows.indexOf(it);
+      anchor = from.id;
+      vp.selectAll([...rows.slice(Math.min(a, b), Math.max(a, b) + 1).filter(i => i !== it), it]);
+      return;
+    }
+    anchor = it.id;
+    if (e.ctrlKey || e.metaKey) vp.togglePick(it); else vp.select(it);
+  };
+
+  let shown = null, drawnItems = null, drawnKey = null;
+  const paintList = () => {
+    const S = vp.scene, groups = tree(), rows = groups.flatMap(g => g.rows);
+    const total = S.items.length;
+    count.textContent = find.value.trim() ? `${rows.length} of ${total}` : `${S.objects.length} objects · ${S.emitters.length} of ${MAX_EMITTERS} sources` + (S.lights.length ? ` · ${S.lights.length} lights` : '') + (S.marks.length ? ` · ${S.marks.length} marks` : '');
+    const isOff = it => (it.kind === 'emitter' || it.kind === 'light') && it.on === false;
+    const key = rows.map(({ it, depth }) => [it.id, it.name, S.isPicked(it), isOff(it), isHiddenThing(it), depth, swatchOf(it)].join('|')).join('\n');
+    const same = drawnItems && key === drawnKey && drawnItems.length === rows.length && rows.every((r, i) => r.it === drawnItems[i]);
+    if (!same) {
+      drawnItems = rows.map(r => r.it); drawnKey = key;
+      const keep = list.scrollTop;
+      list.textContent = '';
+      if (!S.items.length) list.append(el('div', { class: 'empty' }, 'Empty. Add shapes, objects, sources, lights or marks from the tools on the left.'));
+      else if (!rows.length) list.append(el('div', { class: 'empty' }, 'Nothing here matches the search.'));
+      for (const g of groups) {
+        list.append(el('div', { class: 'ghead' }, g.title));
+        for (const { it, depth } of g.rows) {
+          const on = S.isPicked(it), off = isOff(it), hid = isHiddenThing(it);
+          const row = el('div', { class: 'item' + (on ? ' on' : '') + (off ? ' off' : '') + (hid ? ' hid' : '') + (depth ? ' part' : ''), role: 'option', 'aria-selected': on ? 'true' : 'false' },
+            icon(itemIcon(it), 18),
+            el('span', { class: 'nm' }, it.name + (off ? ' (off)' : '')),
+            el('span', { class: 'sw', style: `background:${swatchOf(it)}` }),
+            el('button', { type: 'button', class: 'ib', title: (hid ? 'Show it' : 'Hide it') + ' (H). Hidden things still work.', 'aria-label': (hid ? 'Show ' : 'Hide ') + it.name,
+              onclick: e => { e.stopPropagation(); app.toggleHidden(S.isPicked(it) ? vp.selectedItems() : [it]); } }, icon(hid ? 'eyeOff' : 'eye', 16)));
+          row.addEventListener('click', e => clickRow(e, it));
+          row.addEventListener('dblclick', () => { vp.select(it); vp.frameSelected(); });
+          row.addEventListener('contextmenu', e => { e.preventDefault(); app.contextMenu(it, e.clientX, e.clientY); });
+          list.append(row);
+        }
+      }
+      list.scrollTop = keep;
+    }
+    if (S.selected !== shown && list.isConnected) {
+      shown = S.selected;
+      const sel = [...list.querySelectorAll('.item.on')][rows.filter(r => S.isPicked(r.it)).findIndex(r => r.it === S.selected)] || list.querySelector('.item.on');
       if (sel) {
         const r = sel.getBoundingClientRect(), l = list.getBoundingClientRect();
         if (r.top < l.top) list.scrollTop += r.top - l.top;
@@ -73,32 +128,50 @@ export function scenePanel(app) {
       }
     }
   };
+  find.addEventListener('input', paintList);
+
+  let findDetails = '';
+  const ctx = { vp, commit: () => app.commit(), repaint: () => { repaintAll(props); app.showDecalHandles(); }, repaintSoon: () => setTimeout(() => repaintAll(props), 50), paintList,
+    showTab: k => document.querySelector(`[data-tab="${k}"]`).click(),
+    menu: (x, y, items) => app.smallMenu(x, y, items), say: t => app.toast(t, true),
+    editDecal: () => app.showDecalHandles(),
+    rebuild: () => { const body = document.getElementById('body'), keep = body ? body.scrollTop : 0; paintProps(); app.showDecalHandles(); if (body) body.scrollTop = keep; } };
 
   const paintProps = () => {
     props.textContent = '';
-    const it = vp.scene.selected;
-    if (!it) {
-      props.append(section('Selected', el('p', { class: 'note' }, 'Nothing selected. Click a thing in the view or in the list above.')));
+    const group = vp.selectedItems(), it = vp.scene.selected;
+    if (!group.length) {
+      props.append(section('Details', el('p', { class: 'note' }, 'Nothing selected. Click a thing in the view or in the list above. In the view, Shift-click selects more than one; in the list, Shift-click selects everything between two rows.')));
       return;
     }
     const commit = () => app.commit();
-    const name = el('input', { class: 'name-in', value: it.name, 'aria-label': 'Name' });
-    name.addEventListener('input', () => { it.name = name.value; paintList(); });
-    name.addEventListener('change', commit);
-    const a = assetOf(it);
-    const title = it.kind === 'mark' ? MARK_TYPES[it.type].label : it.kind === 'emitter' ? sourceLabel(it) : it.kind === 'light' ? LIGHT_KINDS[it.type]
-      : a ? a.label : it.model ? 'Model' : SHAPES[it.shape].label;
-    props.append(section(null, el('h3', {}, title), name));
-
-    if (it.kind === 'mark') props.append(...markSections(app, it, commit));
-    else if (it.kind === 'object') props.append(...objectSections(app, it, commit));
-    else if (it.kind === 'light') props.append(...lightSections(app, it, commit));
-    else props.append(...sourceSections(app, it, commit));
-
+    const finder = el('input', { class: 'find', type: 'search', placeholder: 'Search its settings', 'aria-label': 'Search its settings', spellcheck: 'false', value: findDetails });
+    const none = el('p', { class: 'note', hidden: true }, 'No setting here matches. Clear the search to see them all.');
+    if (group.length > 1) {
+      const names = group.map(g => g.name);
+      props.append(section(`${group.length} selected`,
+        el('p', { class: 'note' }, names.length > 6 ? names.slice(0, 5).join(', ') + ` and ${names.length - 5} more` : names.join(', ')), finder, none));
+    } else {
+      const name = el('input', { class: 'name-in', value: it.name, 'aria-label': 'Name' });
+      name.addEventListener('input', () => { it.name = name.value; paintList(); });
+      name.addEventListener('change', commit);
+      const a = assetOf(it);
+      const title = it.kind === 'mark' ? MARK_TYPES[it.type].label : it.kind === 'emitter' ? sourceLabel(it) : it.kind === 'light' ? LIGHT_KINDS[it.type]
+        : a ? a.label : it.model ? 'Model' : SHAPES[it.shape].label;
+      props.append(section(null, el('h3', {}, title), name, finder, none));
+    }
+    if (group.length === 1) { const k = kitStatus(app, it, commit); if (k) props.append(k); }
+    const cats = group.length === 1 && it.kind === 'mark' ? [...markSections(app, it, commit), ...categoriesFor([it], ctx)] : categoriesFor(group, ctx);
+    props.append(...cats);
+    if (group.length === 1) props.append(...aboutSections(app, it, commit));
+    const refind = () => { const n = filterRows(props, findDetails); none.hidden = !findDetails.trim() || n > 0; };
+    finder.addEventListener('input', () => { findDetails = finder.value; refind(); });
+    refind();
+    const many = group.length > 1 ? ` ${group.length}` : '';
     props.append(el('div', { class: 'btns' },
-      button('Duplicate', () => app.duplicate(it), { title: 'Ctrl+D' }),
-      it.kind !== 'mark' || it.pos ? button('Focus', () => vp.frameSelected(), { title: 'Bring the camera to it (F)' }) : null,
-      app.confirmButton('Delete', () => app.remove(it))));
+      button('Duplicate' + many, () => app.duplicateAll(group), { title: 'Ctrl+D' }),
+      group.length === 1 && (it.kind !== 'mark' || it.pos) ? button('Focus', () => vp.frameSelected(), { title: 'Bring the camera to it (F)' }) : null,
+      app.confirmButton('Delete' + many, () => app.removeAll(group))));
   };
 
   root.paint = () => { paintList(); paintProps(); };
@@ -108,52 +181,28 @@ export function scenePanel(app) {
   return root;
 }
 
-function positionRow(app, it, commit) {
-  const moving = () => it.kind === 'object' && motionOn(it.motion) && it.home;
-  return numbers({ label: 'Position (m)', keys: ['X', 'Y', 'Z'], step: 0.05, get: i => it.pos[i],
-    set: (i, v) => {
-      v = i === 1 ? Math.max(0, v) : v;
-      if (moving()) it.home.pos[i] += v - it.pos[i];
-      it.pos[i] = v;
-    }, commit });
+function kitStatus(app, it, commit) {
+  const vp = app.vp, a = assetOf(it);
+  if (it.kind !== 'object' || !a || !a.sources || !a.sources.length) return null;
+  if (vp.scene.emitters.some(e => e.attach && e.attach.to === it.id)) return null;
+  const s = a.sources[0], word = s.sink ? (s.type === 'smoke' ? 'extractor' : 'drain') : s.type === 'smoke' ? 'smoke source' : 'pour';
+  const B = vp.regionBox, inBox = it.pos[0] >= B.min[0] && it.pos[0] <= B.max[0] && it.pos[2] >= B.min[2] && it.pos[2] <= B.max[2];
+  const need = a.sources.length, full = vp.scene.emitters.length + need > MAX_EMITTERS;
+  if (it.whenInBox && it.whenInBox.parts) {
+    if (inBox && full) return section('Not working yet', el('p', { class: 'note warn' }, `Its ${word} waits for a free source: a scene holds ${MAX_EMITTERS}, all in use. Delete one and it starts.`));
+    if (!inBox) return section('Not working yet', el('p', { class: 'note warn' }, `Its ${word} starts when it is in the simulation box. Move it there, or:`),
+      el('div', { class: 'btns' }, button('Bring the box to it', () => { const R = vp.boxToTake([it]); if (R) app.setSimulation({ region: { size: R.size, center: R.center }, keep: true }); },
+        { title: 'Grow the simulation box to take it in. A bigger box costs more card time.' })));
+    return null;
+  }
+  return section('Not working', el('p', { class: 'note warn' }, `Its ${word} is gone: it was deleted, or there was no free source when it was made.`),
+    el('div', { class: 'btns' }, button(`Add its ${word}`, () => { it.whenInBox = { parts: true }; commit(); app.repaint(); })));
 }
 
-function objectSections(app, it, commit) {
+function aboutSections(app, it, commit) {
   const vp = app.vp, out = [];
-  const def = SHAPES[it.shape];
-  const place = section('Place', positionRow(app, it, commit));
-  if (def.sizing === 'radius') {
-    place.append(numbers({ label: 'Size (m)', keys: ['R', 'H'], step: 0.05,
-      get: i => i === 0 ? it.size[0] : it.size[1] * 2,
-      set: (i, v) => { v = Math.max(0.02, v); if (i === 0) { it.size[0] = v; it.size[2] = v; } else it.size[1] = v / 2; }, commit }));
-  } else if (def.sizing === 'uniform') {
-    place.append(numbers({ label: 'Size (m)', keys: ['⌀'], step: 0.05, get: () => it.size[0] * 2,
-      set: (i, v) => { v = Math.max(0.04, v) / 2; it.size = [v, v, v]; }, commit }));
-  } else {
-    place.append(numbers({ label: 'Size (m)', keys: ['W', 'H', 'D'], step: 0.05, get: i => it.size[i] * 2,
-      set: (i, v) => { it.size[i] = Math.max(0.01, v / 2); }, commit }));
-  }
-  place.append(numbers({ label: 'Rotation (°)', keys: ['Tilt', 'Turn', 'Roll'], step: 1,
-    get: i => it.rot[i] * DEG, set: (i, v) => { it.rot[i] = v / DEG; if (it.home && motionOn(it.motion)) it.home.rot[i] = v / DEG - (i === 1 ? (motionAt(it, vp.simTime) || { turn: 0 }).turn : 0); }, commit }));
-  place.append(el('div', { class: 'btns' },
-    button('Put on the ground', () => { dropToGround(vp, it); if (it.home) it.home.pos[1] = it.pos[1] - ((motionAt(it, vp.simTime) || { off: [0, 0, 0] }).off[1]); app.repaint(); commit(); },
-      { title: 'Lower or raise it so its lowest point touches the ground.' })));
-  out.push(place);
-
-  const look = section('Look',
-    color({ label: 'Colour', get: () => rgbToHex(it.color), set: v => { it.color = hexToRgb(v); app.scenePanelList(); }, commit }),
-    choice({ label: 'Finish', options: OBJECT_FINISHES, wrap: true, get: () => it.finish || 'plain',
-      set: v => { it.finish = v === 'plain' ? null : v; }, commit,
-      titles: { plain: 'As objects have always been drawn', matte: 'No shine: paper, card, plaster', gloss: 'A sharp shine: printed plastic, lacquer',
-        metal: 'Grainy metal that takes the colour of what it mirrors', glass: 'See-through, brighter at its edges (it does not bend what is behind it)' } }),
-    el('p', { class: 'note' }, 'Ready materials: colour and finish together.'),
-    swatches({ items: SWATCHES.map(s => ({ label: s.label, color: s.color, clear: s.finish === 'glass',
-      apply: () => { it.color = hexToRgb(s.color); it.finish = s.finish; app.repaint(); } })), commit }));
-  out.push(look);
-  out.push(motionSection(app, it, commit));
-  out.push(physicsSection(app, it, commit));
-  out.push(labelButtons(app, it));
-  if (it.model && !(assetOf(it) && assetOf(it).mesh)) {
+  if (it.kind !== 'mark') out.push(labelButtons(app, it));
+  if (it.kind === 'object' && it.model && !(assetOf(it) && assetOf(it).mesh)) {
     const m = vp.scene.models.get(it.model);
     const half = m.fileHalf ? m.fileHalf.map(v => (v * 2).toPrecision(3)).join(' × ') + ' file units' : '';
     out.push(section('From file',
@@ -164,45 +213,12 @@ function objectSections(app, it, commit) {
           { title: 'For models made with Z pointing up (CAD, 3D printing): turn them upright, or back.' }),
         button('Keep proportions', () => { const k = Math.max(...it.size); it.size = m.prop.map(p => p * k); dropToGround(vp, it); app.repaint(); commit(); },
           { title: 'Undo any stretching: size it in the model\'s own proportions.' }))));
-  } else if (assetOf(it) && assetOf(it).mesh) {
+  } else if (it.kind === 'object' && assetOf(it) && assetOf(it).mesh) {
     const m = vp.scene.models.get(it.model);
     out.push(section('From the library', el('p', { class: 'note' },
       m && m.ready ? 'Made by the app. The fluids flow round it.' : 'Made by the app. Working out its shape for the fluids…')));
   }
   return out;
-}
-
-function motionSection(app, it, commit) {
-  const vp = app.vp;
-  const M = () => (it.motion ||= { travel: 'none', dir: 90, speed: 0.3, distance: 4, spin: 0, bob: 0 });
-  const travelRows = el('div');
-  const showRows = () => { travelRows.hidden = !it.motion || it.motion.travel === 'none'; };
-  const changed = () => {
-    if (motionOn(it.motion)) {
-      if (it.moves) { it.moves = false; app.panels.scene.paintLight(); }
-      const m = motionAt(it, vp.simTime);
-      it.home = { pos: it.pos.map((v, k) => v - m.off[k]), rot: [it.rot[0], it.rot[1] - m.turn, it.rot[2]] };
-    }
-    showRows();
-  };
-  travelRows.append(
-    dial({ label: 'Toward', get: () => M().dir, set: v => { M().dir = v; }, commit }),
-    slider({ label: 'Speed', min: 0, max: 3, step: 0.01, unit: ' m/s', get: () => M().speed, set: v => { M().speed = v; }, commit,
-      help: '0.3 m/s is a slow walk at full size; a model figure a quarter the size walks at about 0.1.' }),
-    slider({ label: 'Distance', min: 0.1, max: 16, step: 0.1, unit: ' m', get: () => M().distance, set: v => { M().distance = v; }, commit,
-      help: 'How far it goes before it starts again (or turns back).' }));
-  const sec = section('Motion',
-    el('p', { class: 'note' }, 'Moves on its own while the simulation plays; the fluids feel it. It starts again with the fluids.'),
-    choice({ label: 'Travel', options: [['none', 'Stays'], ['loop', 'Loop'], ['swing', 'There and back']], wrap: true, get: () => (it.motion && it.motion.travel) || 'none',
-      set: v => { M().travel = v; changed(); }, commit,
-      titles: { none: 'Stays where it was put', loop: 'Goes the distance, then starts again from where it was put', swing: 'Goes the distance and comes back' } }),
-    travelRows,
-    slider({ label: 'Spin', min: -180, max: 180, step: 1, unit: '°/s', reset: 0, get: () => (it.motion && it.motion.spin) || 0,
-      set: v => { M().spin = v; changed(); }, commit, help: 'Turns about up, degrees a second (minus: the other way).' }),
-    slider({ label: 'Bob', min: 0, max: 10, step: 0.5, unit: ' cm', reset: 0, get: () => ((it.motion && it.motion.bob) || 0) * 100,
-      set: v => { M().bob = v / 100; changed(); }, commit, help: 'A walker\'s bounce.' }));
-  showRows();
-  return sec;
 }
 
 function labelButtons(app, it) {
@@ -212,100 +228,6 @@ function labelButtons(app, it) {
       button('Label it', () => app.addMark('label', { target: it.id, text: it.kind === 'emitter' ? '{name}' : '{name}\n{height}' }),
         { title: 'A label on it that follows it, with its name and height (change the text to show other live numbers).' }),
       button('Link from it…', () => app.startLink(it), { title: 'A line from it to another thing: click the other thing next.' })));
-}
-
-function attachedNote(app, it) {
-  const o = it.attach && app.vp.scene.objects.find(x => x.id === it.attach.to);
-  return o ? el('p', { class: 'note' }, `Part of ${o.name}: it moves, turns, is copied and deleted with it. Move it to change where it sits on it.`) : null;
-}
-
-function sinkSections(app, it, commit) {
-  const water = it.type === 'liquid';
-  return [section('Place', positionRow(app, it, commit), attachedNote(app, it)),
-    section(water ? 'Drain' : 'Extractor',
-      el('p', { class: 'note' }, water ? 'Water that reaches the dark ball is taken away, and the water round it flows toward it.'
-        : 'Smoke that reaches the dark ball is taken away, and the air round it is drawn toward it, as into a kitchen hood.'),
-      toggle({ label: 'On', get: () => it.on !== false, set: v => { it.on = v; }, commit }),
-      slider({ label: 'Strength', min: 0, max: 4, step: 0.05, reset: 1, get: () => it.rate, set: v => { it.rate = v; }, commit,
-        help: water ? 'How hard it pulls the water in. At 1, one of the Drain tool\'s size takes about what a liquid source pours, some 30 litres a second.'
-          : 'How hard it draws the air in. At 1, the air beside one of the Extractor tool\'s size moves in at about 0.3 m/s.' }),
-      slider({ label: 'Size', min: 0.05, max: 1, step: 0.01, unit: ' m', get: () => it.radius, set: v => { it.radius = v; }, commit,
-        help: 'Radius of the ball it takes in through: bigger takes in more.' })),
-    timerSection(app, it, commit),
-    labelButtons(app, it)];
-}
-
-function timerSection(app, it, commit) {
-  const P = () => (it.pulse ||= { on: 3, off: 3, delay: 0 });
-  return section('Timer',
-    el('p', { class: 'note' }, 'Switches itself on and off as the simulation plays, starting again with the fluids. Group sources by giving them the same times.'),
-    toggle({ label: 'On a timer', get: () => !!(it.pulse && it.pulse.on > 0 && it.pulse.off > 0), set: v => { if (v) { P(); if (!(it.pulse.on > 0)) it.pulse.on = 3; if (!(it.pulse.off > 0)) it.pulse.off = 3; } else it.pulse = null; app.repaint(); }, commit }),
-    slider({ label: 'On for', min: 0.1, max: 20, step: 0.1, unit: ' s', get: () => (it.pulse && it.pulse.on) || 3, set: v => { P().on = v; }, commit }),
-    slider({ label: 'Off for', min: 0.1, max: 20, step: 0.1, unit: ' s', get: () => (it.pulse && it.pulse.off) || 3, set: v => { P().off = v; }, commit }),
-    slider({ label: 'Starts after', min: 0, max: 20, step: 0.1, unit: ' s', get: () => (it.pulse && it.pulse.delay) || 0, set: v => { P().delay = v; }, commit }));
-}
-
-function sourceSections(app, it, commit) {
-  if (it.sink) return sinkSections(app, it, commit);
-  const out = [section('Place', positionRow(app, it, commit), attachedNote(app, it))];
-  const src = section('Source',
-    toggle({ label: 'On', get: () => it.on !== false, set: v => { it.on = v; }, commit }),
-    color({ label: 'Colour', get: () => rgbToHex(it.color), set: v => { it.color = hexToRgb(v); app.scenePanelList(); }, commit }),
-    slider({ label: 'Amount', min: 0, max: 3, step: 0.05, reset: 1, get: () => it.rate, set: v => { it.rate = v; }, commit,
-      help: it.type === 'smoke' ? 'How much smoke it puts out.' : 'How much liquid it sprays.' }),
-    slider({ label: 'Size', min: 0.03, max: 1, step: 0.01, unit: ' m', get: () => it.radius, set: v => { it.radius = v; }, commit,
-      help: it.type === 'smoke' ? 'Radius of the ball the smoke comes out of.' : 'Radius of the nozzle.' }),
-    slider({ label: 'Speed', min: 0, max: it.type === 'smoke' ? 4 : 8, step: 0.1, unit: ' m/s', get: () => it.speed, set: v => { it.speed = v; }, commit,
-      help: 'How fast it comes out.' }));
-  if (it.type === 'smoke') {
-    src.append(slider({ label: 'Heat', min: 0, max: 3, step: 0.05, reset: 1, get: () => it.heat ?? 1, set: v => { it.heat = v; }, commit,
-      help: 'Hot smoke rises faster; 0 is a cold mist that sinks. Houdini: Temperature.' }));
-  }
-  const aim = () => { const d = it.dir; return { az: (Math.atan2(d[0], d[2]) * DEG + 360) % 360, el: Math.asin(Math.max(-1, Math.min(1, d[1] / Math.hypot(...d)))) * DEG }; };
-  out.push(src, section('Direction',
-    dial({ label: 'Compass', get: () => aim().az, set: v => { it.dir = fromAngles(v, aim().el); }, commit }),
-    slider({ label: 'Up or down', min: -90, max: 90, step: 1, unit: '°', get: () => aim().el, set: v => { it.dir = fromAngles(aim().az, v); }, commit,
-      help: '90 points straight up, -90 straight down.' })),
-  timerSection(app, it, commit),
-  labelButtons(app, it));
-  return out;
-}
-
-function lightSections(app, it, commit) {
-  const area = it.type === 'area', spot = it.type === 'spot', point = it.type === 'point';
-  const out = [section('Place', positionRow(app, it, commit))];
-  const lamp = section('Light',
-    toggle({ label: 'On', get: () => it.on !== false, set: v => { it.on = v; app.scenePanelList(); }, commit }),
-    color({ label: 'Colour', get: () => rgbToHex(it.color), set: v => { it.color = hexToRgb(v); app.scenePanelList(); }, commit }),
-    slider({ label: 'Strength', min: 0, max: 40, step: 0.1, reset: area ? 6 : point ? 3 : 12, get: () => it.power, set: v => { it.power = v; }, commit,
-      help: 'At 1, it lights a white wall a metre in front of it to mid-grey; twice as far, a quarter as bright.' }));
-  if (area) {
-    lamp.append(slider({ label: 'Width', min: 0.04, max: 6, step: 0.01, unit: ' m', get: () => it.radius * 2, set: v => { it.radius = v / 2; }, commit,
-      help: 'A bigger panel gives softer light and softer shadows.' }),
-    slider({ label: 'Height', min: 0.04, max: 6, step: 0.01, unit: ' m', get: () => it.radius * 2 * (it.aspect ?? 0.6), set: v => { it.aspect = v / (it.radius * 2); }, commit }));
-  } else {
-    lamp.append(slider({ label: 'Size', min: 0.01, max: 1, step: 0.005, unit: ' m', get: () => it.radius, set: v => { it.radius = v; }, commit,
-      help: point ? 'Radius of the bulb: a bigger one gives softer shadows.' : 'Radius of the lamp: a bigger one gives softer shadows.' }));
-  }
-  if (spot) {
-    lamp.append(slider({ label: 'Beam', min: 2, max: 170, step: 1, unit: '°', get: () => it.angle ?? 40, set: v => { it.angle = v; }, commit,
-      help: 'How wide the cone of light is, edge to edge.' }),
-    slider({ label: 'Soft edge', min: 0, max: 1, step: 0.01, get: () => it.soft ?? 0.3, set: v => { it.soft = v; }, commit,
-      help: 'How much of the beam fades out toward its edge: 0 a sharp circle, 1 a fade from the middle.' }));
-  }
-  lamp.append(toggle({ label: 'Casts shadows', get: () => it.shadows !== false, set: v => { it.shadows = v; }, commit }),
-    toggle({ label: 'Show the light', get: () => it.show !== false, set: v => { it.show = v; }, commit,
-      help: 'Draw the lamp itself in the picture. Off, it still lights the scene.' }));
-  out.push(lamp);
-  if (!point) {
-    const aim = () => { const d = it.dir; return { az: (Math.atan2(d[0], d[2]) * DEG + 360) % 360, el: Math.asin(Math.max(-1, Math.min(1, d[1] / Math.hypot(...d)))) * DEG }; };
-    out.push(section('Direction',
-      dial({ label: 'Compass', get: () => aim().az, set: v => { it.dir = fromAngles(v, aim().el); }, commit }),
-      slider({ label: 'Up or down', min: -90, max: 90, step: 1, unit: '°', get: () => aim().el, set: v => { it.dir = fromAngles(aim().az, v); }, commit,
-        help: '-90 shines straight down, 90 straight up.' })));
-  }
-  out.push(labelButtons(app, it));
-  return out;
 }
 
 
@@ -434,32 +356,24 @@ export function dropToGround(vp, o) { vp.dropToGround(o); }
 
 export function fluidsPanel(app) {
   const vp = app.vp, S = () => vp.settings;
-  const set = k => v => vp.set(k, v);
+  const set = k => v => { vp.set(k, v); app.markDirty(); };
+  const row = k => {
+    const d = FLUID_SETTINGS.find(x => x.key === k);
+    return slider({ label: d.label, min: d.min, max: d.max, step: d.step, unit: d.unit, reset: d.value, get: () => S()[k] ?? d.value, set: set(k),
+      help: [d.help, d.also].filter(Boolean).join('\n') });
+  };
   const live = el('p', { class: 'note' });
   const region = regionSection(app);
   const root = el('div', {},
     region,
-    section('Display',
-      toggle({ label: 'Show the simulation box', get: () => vp.display.box, set: v => { vp.display.box = v; } }),
-      toggle({ label: 'Show sources', get: () => vp.display.sources, set: v => { vp.display.sources = v; } }),
-      toggle({ label: 'Show marks', get: () => vp.display.marks, set: v => { vp.display.marks = v; } }),
-      el('div', { class: 'btns' }, button('Empty the fluids', () => vp.resetFluids(), { title: 'Removes all smoke and liquid; keeps everything else.' }))),
-    section('Time',
-      slider({ label: 'Speed', min: 0.1, max: 2, step: 0.05, reset: 1, get: () => S().speed, set: set('speed'), help: 'How fast time runs. Houdini: Time scale.' })),
-    section('Smoke',
-      slider({ label: 'Density', min: 0, max: 3, step: 0.05, reset: 1, get: () => S().smokeAmount, set: set('smokeAmount'), help: 'How much smoke every source puts out. Houdini: Density · Blender: Flow density.' }),
-      slider({ label: 'Thickness', min: 1, max: 40, step: 0.5, reset: 10, get: () => S().smokeOpacity, set: set('smokeOpacity'), help: 'How much light the smoke blocks: haze or dense smoke. Houdini: Density scale.' }),
-      slider({ label: 'Rise', min: 0, max: 8, step: 0.1, reset: 2.5, get: () => S().rise, set: set('rise'), help: 'How strongly hot smoke rises. Houdini: Buoyancy lift · Blender: Heat.' }),
-      slider({ label: 'Swirl', min: 0, max: 3, step: 0.05, reset: 1, get: () => S().swirl, set: set('swirl'), help: 'How many small curls the smoke keeps. Houdini: Confinement · Blender: Vorticity.' }),
-      slider({ label: 'Fade', min: 0, max: 1.5, step: 0.01, reset: 0.12, get: () => S().fade, set: set('fade'), help: 'How quickly smoke thins away. Houdini: Dissipation · Blender: Dissolve.' })),
-    section('Liquid',
-      slider({ label: 'Flow', min: 0, max: 3, step: 0.05, reset: 1, get: () => S().flow, set: set('flow'), help: 'How much every liquid source sprays.' }),
-      slider({ label: 'Splash', min: 0, max: 0.99, step: 0.01, reset: 0.95, get: () => S().splash, set: set('splash'), help: 'Lively and splashy (high) or calm and thick (low). Houdini and Blender: FLIP ratio.' }),
-      slider({ label: 'Clarity', min: 0, max: 1, step: 0.01, reset: 0.85, get: () => S().clarity, set: set('clarity'), help: 'Clear like water (high) or solid like paint (low).' }),
-      choice({ label: 'Look', fit: true, options: [['smooth', 'Smooth'], ['surface', 'Surface'], ['dots', 'Particles']],
+    category('f-time', 'Time and gravity', [row('speed'), row('gravity'),
+      el('div', { class: 'btns' }, button('Empty the fluids', () => vp.resetFluids(), { title: 'Removes all smoke and liquid; keeps everything else.' }))]),
+    category('f-smoke', 'Smoke', [row('smokeAmount'), row('fade'), row('cooling'), row('rise'), row('smokeWeight'), row('swirl'), row('smokeDetail'), row('smokeSteps'), row('smokeOpacity')]),
+    category('f-liquid', 'Liquid', [row('flow'), row('splash'), row('liquidSteps'), row('clarity'), row('foam'), row('caustics'),
+      choice({ label: 'Look', wrap: true, options: [['smooth', 'Smooth'], ['surface', 'Surface'], ['dots', 'Particles']],
         titles: { smooth: 'One smooth surface made from all the particles', surface: 'The particles drawn as balls and smoothed together (the look before November 2026)', dots: 'Each particle as a small ball' },
         get: () => S().look, set: set('look') }),
-      live));
+      live]));
   root.paint = () => repaintAll(root);
   root.tick = () => {
     region.check();
@@ -531,37 +445,6 @@ function fitRegion(vp) {
   const pad = 0.5, L = REGION_LIMITS;
   const size = [hi[0] - lo[0] + 2 * pad, Math.max(hi[1] + 1.5, 2), hi[2] - lo[2] + 2 * pad].map(v => Math.min(L.max, Math.max(2, +v.toFixed(1))));
   return { size, center: [+((lo[0] + hi[0]) / 2).toFixed(2), +((lo[2] + hi[2]) / 2).toFixed(2)] };
-}
-
-
-function physicsSection(app, it, commit) {
-  const vp = app.vp;
-  const weight = el('p', { class: 'note' });
-  const paintWeight = () => {
-    const m = vp.physics.massOf(it), mat = MATERIALS[it.material] || MATERIALS.wood;
-    const floats = mat.density < 1000 ? 'floats in water' : 'sinks in water';
-    weight.textContent = m ? `${mat.label}: ${m.mass < 10 ? m.mass.toFixed(2) : fmtN(m.mass)} kg, ${(m.volume * 1000).toFixed(m.volume < 0.01 ? 2 : 0)} litres; ${floats}.` : '';
-  };
-  weight.paint = paintWeight;
-  const sec = section('Physics',
-    toggle({ label: 'Has weight: falls, can be pushed', get: () => !!it.moves,
-      set: v => {
-        it.moves = v;
-        if (v && motionOn(it.motion)) { it.motion.travel = 'none'; it.motion.spin = 0; it.motion.bob = 0; app.repaint(); }
-        it.home = { pos: [...it.pos], rot: [...it.rot] };
-      }, commit,
-      help: 'On: it falls, stacks, tumbles, and water and wind push it. Off: it stays where it is put (or follows its motion).' }),
-    toggle({ label: 'Collision', get: () => it.collides !== false, set: v => { it.collides = v; }, commit,
-      help: 'Off: other objects, smoke and liquid all pass through it. (A moving object still lands on the ground.)' }),
-    choice({ label: 'Material', options: Object.entries(MATERIALS).map(([k, m]) => [k, m.label]), wrap: true,
-      get: () => it.material || 'wood', set: v => { it.material = v; setTimeout(paintWeight, 50); }, commit,
-      titles: Object.fromEntries(Object.entries(MATERIALS).map(([k, m]) => [k, `${m.density} kg per cubic metre; grip ${m.friction}, bounce ${m.bounce}`])) }),
-    weight,
-    el('div', { class: 'btns' },
-      button('Put back', () => { if (it.home) { it.pos = [...it.home.pos]; it.rot = [...it.home.rot]; app.repaint(); } },
-        { title: 'Back to where it was put, still.' })));
-  setTimeout(paintWeight, 50);
-  return sec;
 }
 
 
@@ -658,6 +541,10 @@ export function worldPanel(app) {
       paintColours();
       repaintAll(root);
     } });
+  const groundBox = el('div');
+  const groundCtx = { vp, commit: () => app.commit(), repaint: () => { repaintAll(groundBox); app.showDecalHandles(); }, repaintSoon: () => setTimeout(() => repaintAll(groundBox), 50), paintList: () => {},
+    showTab: k => document.querySelector(`[data-tab="${k}"]`).click(), menu: (x, y, items) => app.smallMenu(x, y, items), say: t => app.toast(t, true),
+    editDecal: () => app.showDecalHandles(), rebuild: () => { paintGround(); app.showDecalHandles(); } };
   const lines = el('div');
   lines.append(
     color({ label: 'Line colour', get: () => G().gridColor || '#808080', set: v => { G().gridColor = v; } }),
@@ -675,8 +562,14 @@ export function worldPanel(app) {
       choice({ label: 'Pattern', options: GROUND_PATTERNS, get: () => patternOf(G()),
         set: v => { G().grid = v === 'bricks' ? 'bricks' : v === 'lines'; paintPattern(); },
         titles: { none: 'A plain floor', lines: 'Grid lines: a guide, or grid paper with a colour and a fine spacing', bricks: 'Brick paving, 21.5 by 6.5 cm' } }),
-      lines));
-  root.paint = () => { paintColours(); paintPattern(); repaintAll(root); };
+      lines),
+    groundBox);
+  const paintGround = () => {
+    const body = document.getElementById('body'), keep = body ? body.scrollTop : 0;
+    groundBox.replaceChildren(...groundCategories(groundCtx));
+    if (body) body.scrollTop = keep;
+  };
+  root.paint = () => { paintColours(); paintPattern(); paintGround(); repaintAll(root); };
   root.paint();
   return root;
 }
@@ -689,11 +582,25 @@ export function filtersPanel(app) {
   const val = k => { const p = P(); return p && p[k] !== undefined ? p[k] : POST_DEFAULTS[k]; };
   const put = k => v => { ensure()[k] = v; ensure().preset = 'custom'; presetRow.paint(); };
   const s = (label, k, min, max, step, unit, help) => slider({ label, min, max, step, unit, reset: POST_DEFAULTS[k], get: () => val(k), set: put(k), help });
+  const filmRow = choice({ options: [['none', 'None'], ...Object.entries(FILM_LOOKS).map(([k, f]) => [k, f.label])], wrap: true,
+    get: () => (P() && P().film) || 'none',
+    set: v => { ensure().film = v === 'none' ? null : v; repaintAll(root); },
+    titles: Object.fromEntries([['none', 'No film look'], ...Object.entries(FILM_LOOKS).map(([k, f]) => [k, `${f.says} In the manner of Fujifilm ${f.after}.`])]) });
+  const dSet = k => v => { ensure()[k] = v; ensure().diffusion = 'custom'; diffRow.paint(); };
+  const ds = (label, k, min, max, step, help) => slider({ label, min, max, step, reset: POST_DEFAULTS[k], get: () => val(k), set: dSet(k), help });
+  const diffRow = choice({ options: Object.entries(DIFFUSIONS).map(([k, f]) => [k, f.label]), wrap: true,
+    get: () => (P() && P().diffusion) || (val('bloom') || val('veil') || val('softHigh') ? 'custom' : 'none'),
+    set: v => { Object.assign(ensure(), DIFFUSIONS[v].p, { diffusion: v }); repaintAll(root); },
+    titles: Object.fromEntries(Object.entries(DIFFUSIONS).map(([k, f]) => [k, f.says || 'None'])) });
   const band = () => (P() && P().band) || null;
   const setBand = (k, v) => { const b = ensure().band ||= { center: 0.56, half: 0.13, blur: 5 }; b[k] = v; ensure().preset = 'custom'; presetRow.paint(); };
   const presetRow = choice({ options: Object.entries(FILTER_PRESETS).map(([k, f]) => [k, f.label]), wrap: true,
     get: () => (P() && P().preset) || 'none',
-    set: v => { vp.look.post = v === 'none' ? null : { ...copy(FILTER_PRESETS[v].p), preset: v }; app.markDirty(); root.paint(); },
+    set: v => {
+      const keep = Object.fromEntries(Object.entries(P() || {}).filter(([k]) => ['film', 'filmAmount', 'highlights', 'shadows', 'colour', 'warmth', 'green', 'chrome', 'clarity', 'sharpen', 'bloom', 'bloomFrom', 'bloomSpread', 'bloomTint', 'veil', 'softHigh', 'diffusion'].includes(k)));
+      vp.look.post = v === 'none' && !Object.keys(keep).length ? null : { ...keep, ...(v === 'none' ? {} : copy(FILTER_PRESETS[v].p)), preset: v };
+      app.markDirty(); root.paint();
+    },
     titles: {
       none: 'The picture as rendered', photocopy: 'Black and white, hard, grainy, dark corners', haze: 'Soft, glowing, colours pulled apart and pushed up',
       tape: 'A worn video tape: colours pulled sideways, scan lines, a little blur', miniature: 'A sharp band in a soft picture, like a close photograph of a model',
@@ -705,7 +612,28 @@ export function filtersPanel(app) {
     slider({ label: 'Band height', min: 0.02, max: 0.5, step: 0.01, get: () => (band() || { half: 0.13 }).half, set: v => setBand('half', v) }),
     slider({ label: 'Blur', min: 0, max: 14, step: 0.5, unit: ' px', get: () => (band() || { blur: 5 }).blur, set: v => setBand('blur', v), help: 'How soft the picture gets above and below the band.' }));
   const root = el('div', {},
-    section('Start from', presetRow,
+    section('Film', filmRow,
+      el('p', { class: 'note' }, 'Made by hand after each film\'s published character; not measured against a camera. Its name is in each tooltip.'),
+      s('Strength', 'filmAmount', 0, 1, 0.01, '', 'How much of the film look.'),
+      s('Highlights', 'highlights', -1, 1, 0.01, '', 'Over the film: harder or softer bright parts.'),
+      s('Shadows', 'shadows', -1, 1, 0.01, '', 'Over the film: deeper or more open dark parts.'),
+      s('Colour', 'colour', -1, 1, 0.01, '', 'Over the film: more or less colour.'),
+      s('Colour depth', 'chrome', 0, 1, 0.01, '', 'Strong colours deepen and keep their detail.'),
+      s('Warmth', 'warmth', -1, 1, 0.01, '', 'White balance: toward orange or toward blue.'),
+      s('Green or pink', 'green', -1, 1, 0.01, '', 'White balance: toward green or toward magenta.'),
+      s('Clarity', 'clarity', -1, 1, 0.01, '', 'More or less contrast in the middle sizes: minus goes dreamy.'),
+      s('Sharpen', 'sharpen', 0, 1, 0.01),
+      s('Grain', 'grain', 0, 0.3, 0.005),
+      s('Grain size', 'grainSize', 1, 4, 0.05, ' px')),
+    section('Diffusion and bloom', diffRow,
+      el('p', { class: 'note' }, 'Light spreading from bright parts, as through a diffusion filter. It works on the light before the tone curve, so a lamp spreads more than a white wall.'),
+      ds('Amount', 'bloom', 0, 1.5, 0.01, 'How much light spreads.'),
+      ds('From', 'bloomFrom', 0, 3, 0.01, 'How bright a part must be to spread: 0 is all of it, as with a real filter; 1 is a white wall in full light.'),
+      ds('Spread', 'bloomSpread', 0, 1, 0.01, 'How wide: a small halo, or a wide haze.'),
+      color({ label: 'Its colour', get: () => val('bloomTint'), set: dSet('bloomTint'), help: 'White for a filter; red-orange for the halation of film.' }),
+      ds('Veil', 'veil', 0, 0.5, 0.005, 'The light scattered over the whole picture: darks lift, contrast falls.'),
+      ds('Soften whites', 'softHigh', 0, 1, 0.01, 'Blurs the edges of bright parts, leaving the rest sharp.')),
+    section('Picture effects', presetRow,
       el('p', { class: 'note' }, 'Filters work on the finished picture, like a photo editor\'s. They are saved with the scene. Marks stay sharp over them.')),
     section('Colour',
       s('Saturation', 'saturation', 0, 2, 0.01, '', '0 is black and white.'),
@@ -714,15 +642,12 @@ export function filtersPanel(app) {
       color({ label: 'Tint', get: () => val('tint'), set: put('tint') }),
       s('Tint amount', 'tintAmount', 0, 1, 0.01, '', 'Pulls every colour toward the tint. With saturation at 0: a picture in one colour.'),
       s('Posterize', 'posterize', 0, 12, 1, ' steps', 'A few flat tones (0: off).')),
-    section('Film',
-      s('Grain', 'grain', 0, 0.3, 0.005),
+    section('Print and screen',
       s('Scan lines', 'scan', 0, 0.5, 0.01),
       s('Vignette', 'vignette', 0, 1.2, 0.01, '', 'Darker corners.')),
     section('Lens',
       s('Soften', 'soften', 0, 4, 0.1, ' px'),
       s('Colour split', 'split', 0, 8, 0.1, ' px', 'Red and blue pulled sideways, like a worn tape or a cheap lens.'),
-      s('Glow', 'glow', 0, 1, 0.01, '', 'Bright parts spread a soft light round them.'),
-      s('Glow from', 'glowFrom', 0.2, 1, 0.01, '', 'How bright a part must be to glow.'),
       s('Ink lines', 'ink', 0, 1, 0.01, '', 'Dark lines where the picture changes sharply, like a drawing.')),
     section('Miniature',
       toggle({ label: 'Sharp band, soft above and below', get: () => !!band(), set: v => { ensure().band = v ? { center: 0.56, half: 0.13, blur: 5 } : null; ensure().preset = 'custom'; presetRow.paint(); bandRows.hidden = !v; repaintAll(bandRows); } }),
