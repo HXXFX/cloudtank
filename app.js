@@ -936,7 +936,7 @@ function paintInfo() {
         [el('span', {}, el('kbd', {}, 'Ctrl'), ' ', el('kbd', {}, 'S')), 'save the scene as a file'], [el('span', {}, el('kbd', {}, 'Ctrl'), ' ', el('kbd', {}, 'O')), 'open a scene file']]
         .map(([a, b]) => el('tr', {}, el('td', {}, a), el('td', {}, b)))),
     el('h3', {}, 'The start scene'),
-    el('p', {}, 'The app opens on a clear basin turned over on a dark floor: two soft colours of smoke rise under it, two pours land on it and spread across the floor to a drain, with one area light and a film look. It opens empty and fills in about 20 seconds. New brings it back.'),
+    el('p', {}, 'The app opens on a clear basin turned over on a pale floor in the dark: two soft colours of smoke rise under it, two pours land on it and spread across the floor to a drain, with one area light and a film look. It opens empty and fills in about 20 seconds. New brings it back.'),
     el('h3', {}, 'Colour and the look of water'),
     el('p', {}, 'Each source has its own colour (Scene tab, with the source selected). Colours mix as dye does: water colours spread where the water is stirred, so yellow and blue make green, and smoke tints what is behind it and its shadow. The Fluids tab sets how the liquid is drawn: Smooth (one surface made from all the particles), Surface (the particles drawn as balls, smoothed together) or Particles.'),
     el('h3', {}, 'Wind and rain'),
