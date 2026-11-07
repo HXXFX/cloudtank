@@ -1619,7 +1619,7 @@ fn octOf(n: vec3<f32>) -> vec2<f32> {
       break;
     }
     if (fb < nearest) { nearest = fb; nearAt = b; }
-    if (fb > 0.99) { break; }
+    if (fb > 0.99 && fa < 0.99) { break; }
     a = b;
     fa = fb;
   }
@@ -2096,7 +2096,7 @@ fn liquidSurface(px: vec2<i32>, fc: vec2<f32>, vp: vec3<f32>, rd: vec3<f32>, tSc
     nw = normalize(transpose(viewTurn()) * nv);
   }
   let lean = dot(nw, v);
-  if (lean < 0.04) { nw = normalize(nw + v * (0.04 - lean)); }
+  if (lean < 0.04) { nw = normalize(nw + v * (max(-lean, 0.04) - lean)); }
   var dye = th.rgb / max(th.a, 1e-4);
   var foam = 0.0;
   if (smoothLook) { dye = th.rgb; foam = th.a * F.waterMore.x; }

@@ -397,10 +397,9 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   if (touch && P.c.w > 0.0) {
     let here = idx(clamp(vec3<i32>(floor((p - P.origin.xyz) / P.dims.w)), vec3<i32>(0), dimsI() - vec3<i32>(1)));
     let few = 1.0 - smoothstep(1.0, 6.0, f32(atomicLoad(&acc[6u * n + here])));
-    let keep = exp(-P.c.w * (0.1 + few) * P.origin.w);
     let rel = nv - touchV;
     let along = rel - touchN * dot(rel, touchN);
-    nv = nv - along * (1.0 - keep);
+    nv = nv - along * min(1.0, P.c.w * few * P.origin.w / max(length(along), 1e-5));
   }
   let knock = length(nv - v) + 0.1 * length(jostle);
   let foam = min(col[i].w * exp(-P.origin.w / 1.1) + 0.45 * smoothstep(0.32, 1.1, knock), 1.0);
@@ -712,7 +711,7 @@ export class Flip {
     this.params = new Float32Array(40);
     this.frame = 0;
     this.mixing = MIXING;
-    this.drag = 30;
+    this.drag = 2.5;
   }
 
   get live() { return Math.min(this.spawned, this.maxParticles); }
