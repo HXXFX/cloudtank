@@ -8,7 +8,7 @@ function sdBox(x, y, z, sx, sy, sz) {
 }
 
 function sdCone(x, y, z, h, r1) {
-  const qx = Math.hypot(x, z), qy = y;
+  const qx = Math.sqrt(x * x + z * z), qy = y;
   const k1x = 0, k1y = h, k2x = -r1, k2y = 2 * h;
   const cax = qx - Math.min(qx, qy < 0 ? r1 : 0), cay = Math.abs(qy) - h;
   const t = Math.min(Math.max(((k1x - qx) * k2x + (k1y - qy) * k2y) / (k2x * k2x + k2y * k2y), 0), 1);
@@ -23,18 +23,20 @@ export function shapeSdf(x, y, z, o, model) {
   const m = Math.min(sx, sy, sz);
   if (code === 1) return sdBox(x, y, z, sx, sy, sz);
   if (code === 2) {
-    const k0 = Math.hypot(x / sx, y / sy, z / sz);
-    const k1 = Math.hypot(x / (sx * sx), y / (sy * sy), z / (sz * sz));
+    const ax = x / sx, ay = y / sy, az = z / sz, bx = ax / sx, by = ay / sy, bz = az / sz;
+    const k0 = Math.sqrt(ax * ax + ay * ay + az * az);
+    const k1 = Math.sqrt(bx * bx + by * by + bz * bz);
     return k0 * (k0 - 1) / Math.max(k1, 1e-6);
   }
   if (code === 3) {
-    const dx = Math.hypot(x, z) - sx, dy = Math.abs(y) - sy;
-    return Math.min(Math.max(dx, dy), 0) + Math.hypot(Math.max(dx, 0), Math.max(dy, 0));
+    const dx = Math.sqrt(x * x + z * z) - sx, dy = Math.abs(y) - sy, ox = Math.max(dx, 0), oy = Math.max(dy, 0);
+    return Math.min(Math.max(dx, dy), 0) + Math.sqrt(ox * ox + oy * oy);
   }
   if (code === 4) return sdCone(x, y, z, sy, sx);
   if (code === 5) {
     const ux = x / sx, uy = y / sy, uz = z / sz;
-    return (Math.hypot(Math.hypot(ux, uz) - 0.7, uy) - 0.3) * m;
+    const rr = Math.sqrt(ux * ux + uz * uz) - 0.7;
+    return (Math.sqrt(rr * rr + uy * uy) - 0.3) * m;
   }
   if (code === 6) {
     const l = Math.hypot(sy, sx);

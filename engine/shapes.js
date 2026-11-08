@@ -10,6 +10,7 @@ export const SHAPES = {
   stairs: { code: 8, label: 'Stairs', size: [0.6, 0.35, 0.4],   sizing: 'xyz' },
   wall:   { code: 1, label: 'Wall',   size: [0.8, 0.5, 0.05],   sizing: 'xyz', mesh: 'box' },
   slab:   { code: 1, label: 'Slab',   size: [0.8, 0.05, 0.6],   sizing: 'xyz', mesh: 'box' },
+  plane:  { code: 1, label: 'Plane',  size: [0.75, 0.005, 0.75], sizing: 'xyz', mesh: 'box' },
   model:  { code: 9, label: 'Model',  size: [0.5, 0.5, 0.5],    sizing: 'xyz' },
 };
 

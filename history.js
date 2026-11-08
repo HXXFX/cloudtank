@@ -18,7 +18,8 @@ export function itemData(it) {
   }
   return { id: it.id, kind: 'emitter', type: it.type, name: it.name, pos: [...it.pos], radius: it.radius,
     color: [...it.color], dir: [...it.dir], speed: it.speed, rate: it.rate, heat: it.heat ?? 1, on: it.on !== false,
-    pulse: it.pulse ? { ...it.pulse } : null, ...(it.sink ? { sink: true } : {}), ...(it.attach ? { attach: { to: it.attach.to, ...(Number.isInteger(it.attach.part) ? { part: it.attach.part } : {}) } } : {}), ...(it.hidden ? { hidden: true } : {}) };
+    pulse: it.pulse ? { ...it.pulse } : null, ...(it.sink ? { sink: true } : {}), ...(it.attach ? { attach: { to: it.attach.to, ...(Number.isInteger(it.attach.part) ? { part: it.attach.part } : {}) } } : {}), ...(it.hidden ? { hidden: true } : {}),
+    ...(it.own && Object.keys(it.own).length ? { own: { ...it.own } } : {}), ...(it.look ? { look: { ...it.look } } : {}) };
 }
 
 export function restoreItems(scene, data) {
@@ -90,6 +91,7 @@ export class History {
       const d = JSON.parse(s);
       imagesOf(d.ground || {}, used);
       for (const o of d.objects) { imagesOf(o, used); for (const p of o.partLooks || []) imagesOf(p, used); }
+      for (const e of d.emitters || []) if (e.look && e.look.picture) used.add(e.look.picture);
     }
     return used;
   }

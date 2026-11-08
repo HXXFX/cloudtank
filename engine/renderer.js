@@ -1,8 +1,27 @@
 import { makeLayout, makeGroup, makeBuffer, UNIFORM, shaderModule } from './gpu.js';
-import { POST_SHADER, POST_FLOATS, packPost, BLOOM_SHADER, bloomNumbers, wantsBloom } from './post.wgsl.js';
+import { POST_SHADER, POST_FLOATS, packPost, BLOOM_SHADER, bloomNumbers, wantsBloom, buildOn } from './post.wgsl.js';
+import { MEDIA_SHADER, MEDIA_FLOATS, packMedia } from './media.wgsl.js';
+const SHRINK_SHADER =  `
+@group(0) @binding(0) var<uniform> S: vec4<f32>;
+@group(0) @binding(1) var src: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+@vertex fn vsFull(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -3.0), vec2<f32>(3.0, 1.0), vec2<f32>(-1.0, 1.0));
+  return vec4<f32>(p[vi], 0.0, 1.0);
+}
+@fragment fn fsShrink(@builtin(position) fc: vec4<f32>) -> @location(0) vec4<f32> {
+  var sum = vec3<f32>(0.0);
+  for (var j = 0; j < 4; j = j + 1) { for (var i = 0; i < 4; i = i + 1) {
+    sum = sum + textureSampleLevel(src, samp, (floor(fc.xy) + (vec2<f32>(f32(i), f32(j)) + 0.5) / 4.0) / S.xy, 0.0).rgb;
+  } }
+  return vec4<f32>(sum / 16.0, 1.0);
+}
+@fragment fn fsCopy(@builtin(position) fc: vec4<f32>) -> @location(0) vec4<f32> { return textureLoad(src, vec2<i32>(fc.xy), 0); }
+`;
 import { CAUSTIC_SIZE, CAUSTIC_LINES, CAUSTIC_SURFACE_SHADER, CAUSTIC_MESH_SHADER, CAUSTIC_SOFT_SHADER, SCENE_SHADER, SHADOW_SHADER, FLUID_SHADER, BODY_SHADER, FIELD_SHADER, BLUR_SHADER, COMPOSITE_SHADER, OUTLINE_SHADER, GLASS_SHADER, FRAME_FLOATS,
   MAX_LIGHTS, LIGHT_LAYERS, LIGHT_SHADOW_SIZE, LIGHT_NEAR, LIGHT_FLOATS, ENV_SHADER, ENV_BLUR_SHADER, ENV_SIZE, ENV_LEVELS, MAX_DRAW } from './render.wgsl.js';
 import { MAT_FLOATS, DECAL_FLOATS, MAX_DECALS } from './material.js';
+import { FLUID_ROWS, FLUID_FLOATS } from './sdf.wgsl.js';
 import { IMAGE_SIZE, IMAGE_LEVELS, MAX_IMAGE_LAYERS, IMAGE_SHADER } from './images.js';
 import { unitMesh, BUILT_IN } from './shapes.js';
 import { lookAt, ortho, multiply, fromAngles, scale, add, perspective, invert, transform } from './math.js';
@@ -58,6 +77,9 @@ export class Renderer {
     this.postBuf = makeBuffer(d, POST_FLOATS * 4, UNIFORM(), 'picture look');
     this.postData = new Float32Array(POST_FLOATS);
     this.post = null;
+    this.mediaBuf = makeBuffer(d, MEDIA_FLOATS * 4, UNIFORM(), 'media filter');
+    this.mediaData = new Float32Array(MEDIA_FLOATS);
+    this.media = null;
     this.dirX = makeBuffer(d, 16, UNIFORM(), 'blur x');
     this.dirY = makeBuffer(d, 16, UNIFORM(), 'blur y');
     d.queue.writeBuffer(this.dirX, 0, new Float32Array([1, 0, 0, 0]));
@@ -72,6 +94,11 @@ export class Renderer {
     this.noLight = tex3('rgba16float', new Uint16Array(4).fill(0x3c00));
     this.noSky = tex3('rgba8unorm', new Uint8Array([255, 255, 255, 255]));
     this.noParticles = makeBuffer(d, 64, GPUBufferUsage.STORAGE, 'no particles');
+    this.noBuffer = makeBuffer(d, 64, GPUBufferUsage.STORAGE, 'nothing yet');
+    this.fluidBuf = null;
+    this.blockBuf = this.noBuffer;
+    this.artBuf = this.noBuffer;
+    this.cellBuf = this.noBuffer;
     const noPic = d.createTexture({ size: [1, 1], format: 'rgba8unorm-srgb', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     d.queue.writeTexture({ texture: noPic }, new Uint8Array([128, 128, 128, 255]), { bytesPerRow: 4 }, [1, 1]);
     this.bgView = noPic.createView();
@@ -104,7 +131,7 @@ export class Renderer {
 
     const L = {
       scene: makeLayout(d, ['uniform', 'read', 'read', 'read', 'depth', 'sampler-cmp', 'tex3d', 'tex3d', 'sampler', 'tex2d', 'sampler', 'depth-array', 'tex2d-array',
-        'read', 'read', 'tex2d-array', 'tex2d-array', 'sampler', 'tex2d', 'sampler', 'tex3d', 'tex2d'], 'render'),
+        'read', 'read', 'tex2d-array', 'tex2d-array', 'sampler', 'tex2d', 'sampler', 'tex3d', 'tex2d', 'uniform', 'read', 'read'], 'render'),
       causticSurface: makeLayout(d, ['uniform', 'uniform', 'tex3d', 'sampler'], 'render'),
       causticKey: makeLayout(d, ['uniform', 'uniform', 'tex2d-u', 'tex2d-u', 'depth'], 'render'),
       causticPlaced: makeLayout(d, ['uniform', 'uniform', 'tex2d-u', 'tex2d-u', 'depth-array'], 'render'),
@@ -115,13 +142,15 @@ export class Renderer {
       image: makeLayout(d, ['tex2d', 'sampler'], 'render'),
       opaqueDepth: makeLayout(d, ['depth', 'tex2d-u'], 'render'),
       glass: makeLayout(d, ['uniform', 'tex2d', 'depth', 'tex2d-u', 'tex2d-u', 'tex2d-u', 'tex2d-u', 'sampler'], 'render'),
-      shadow: makeLayout(d, ['uniform', 'read', 'read', 'read'], 'render'),
-      fluid: makeLayout(d, ['uniform', 'read', 'read', 'depth', 'tex2d-u'], 'render'),
+      shadow: makeLayout(d, ['uniform', 'read', 'read', 'read', 'uniform', 'read'], 'render'),
+      fluid: makeLayout(d, ['uniform', 'read', 'read', 'depth', 'tex2d-u', 'uniform'], 'render'),
       body: makeLayout(d, ['uniform', 'tex2d-u', 'tex3d', 'sampler'], 'render'),
       field: makeLayout(d, ['uniform', 'tex2d-u', 'tex3d', 'sampler', 'tex3d', 'tex3d'], 'render'),
       blur: makeLayout(d, ['uniform', 'uniform', 'tex2d-u'], 'render'),
-      comp: makeLayout(d, ['uniform', 'tex2d', 'depth', 'tex2d-u', 'tex2d', 'tex3d', 'tex3d', 'sampler', 'depth', 'sampler-cmp', 'tex2d', 'sampler', 'tex3d', 'tex3d', 'tex3d', 'tex2d-u', 'depth-array', 'tex3d', 'tex2d-u', 'tex2d-u'], 'render'),
-      post: makeLayout(d, ['uniform', 'tex2d', 'sampler', 'tex2d', 'tex2d'], 'render'),
+      comp: makeLayout(d, ['uniform', 'tex2d', 'depth', 'tex2d-u', 'tex2d', 'tex3d', 'tex3d', 'sampler', 'depth', 'sampler-cmp', 'tex2d', 'sampler', 'tex3d', 'tex3d', 'tex3d', 'tex2d-u', 'depth-array', 'tex3d', 'tex2d-u', 'tex2d-u', 'uniform', 'read', 'read', 'read', 'read'], 'render'),
+      post: makeLayout(d, ['uniform', 'tex2d', 'sampler', 'tex2d', 'tex2d', 'depth', 'tex2d-u'], 'render'),
+      media: makeLayout(d, ['uniform', 'tex2d', 'sampler', 'tex2d'], 'render'),
+      build: makeLayout(d, ['uniform', 'tex2d', 'sampler'], 'render'),
       bloom: makeLayout(d, ['uniform', 'tex2d', 'sampler'], 'render'),
       outline: makeLayout(d, ['uniform', 'tex2d'], 'render'),
     };
@@ -135,6 +164,7 @@ export class Renderer {
     const blurMod = await shaderModule(d, BLUR_SHADER, 'smoothing');
     const compMod = await shaderModule(d, COMPOSITE_SHADER, 'final picture');
     const postMod = await shaderModule(d, POST_SHADER, 'picture look');
+    const mediaMod = await shaderModule(d, MEDIA_SHADER, 'media filter');
     const bloomMod = await shaderModule(d, BLOOM_SHADER, 'light spread');
     const outlineMod = await shaderModule(d, OUTLINE_SHADER, 'selection outline');
     const glassMod = await shaderModule(d, GLASS_SHADER, 'glass over the scene');
@@ -151,6 +181,7 @@ export class Renderer {
     const meshBuffers = [{ arrayStride: 24, attributes: [
       { shaderLocation: 0, offset: 0, format: 'float32x3' }, { shaderLocation: 1, offset: 12, format: 'float32x3' }] }];
     const uvBuffers = [...meshBuffers, { arrayStride: 8, attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x2' }] }];
+    const softBuffers = [...meshBuffers, { arrayStride: 32, attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x3' }, { shaderLocation: 3, offset: 12, format: 'float32x3' }, { shaderLocation: 4, offset: 24, format: 'float32x2' }] }];
     const dispBuffers = [{ arrayStride: 44, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }, { shaderLocation: 1, offset: 12, format: 'float32x3' },
       { shaderLocation: 2, offset: 24, format: 'float32x3' }, { shaderLocation: 3, offset: 36, format: 'float32x2' }] }];
     const rp = (layout, module, vs, fs, targets, extra = {}) => d.createRenderPipeline({
@@ -174,6 +205,7 @@ export class Renderer {
       objTex: rp(L.scene, sceneMod, 'vsObjTex', 'fsObjTex', [{ format: HDR }], { depth: depthOn, buffers: meshBuffers }),
       objUv: rp(L.scene, sceneMod, 'vsObjUv', 'fsObjTex', [{ format: HDR }], { depth: depthOn, buffers: uvBuffers }),
       objDisp: rp(L.scene, sceneMod, 'vsObjDisp', 'fsObjTex', [{ format: HDR }], { depth: depthOn, buffers: dispBuffers }),
+      objSoft: rp(L.scene, sceneMod, 'vsObjSoft', 'fsObjTex', [{ format: HDR }], { depth: depthOn, buffers: softBuffers }),
       groundTex: rp(L.scene, sceneMod, 'vsGround', 'fsGroundTex', [{ format: HDR }], { depth: depthOn }),
       shadowDisp: d.createRenderPipeline({ layout: d.createPipelineLayout({ bindGroupLayouts: [L.shadow, L.dispShadow] }), vertex: { module: shadowMod, entryPoint: 'vsShadowDisp', buffers: dispBuffers },
         primitive: { topology: 'triangle-list', cullMode: 'none' },
@@ -214,6 +246,12 @@ export class Renderer {
       waterPlaced: clearLight('vsWaterLight', 'fsWaterPlaced', []),
       glassResolve: rp(L.glass, glassMod, 'vsFull', 'fsGlassResolve', [{ format: HDR }]),
       dots: rp(L.scene, sceneMod, 'vsDots', 'fsDots', [{ format: HDR }], { depth: depthOn }),
+      block: rp(L.scene, sceneMod, 'vsBlock', 'fsBlock', [{ format: HDR }], { depth: depthOn }),
+      blockClear: rp(L.scene, sceneMod, 'vsBlockClear', 'fsBlockClear', [{ format: HDR, blend: { color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } } }],
+        { depth: { format: 'depth32float', depthWriteEnabled: false, depthCompare: 'less' } }),
+      shadowBlock: d.createRenderPipeline({ layout: pl(L.shadow), vertex: { module: shadowMod, entryPoint: 'vsShadowBlock' },
+        primitive: { topology: 'triangle-list', cullMode: 'none' },
+        depthStencil: { ...depthOn, depthBias: 2, depthBiasSlopeScale: 2 } }),
       lines: rp(L.scene, sceneMod, 'vsLines', 'fsLines', [{ format: HDR, blend: blendAlpha }],
         { topology: 'line-list', depth: { format: 'depth32float', depthWriteEnabled: false, depthCompare: 'less-equal' } }),
       shadowObj: d.createRenderPipeline({ layout: pl(L.shadow), vertex: { module: shadowMod, entryPoint: 'vsShadowObj', buffers: meshBuffers },
@@ -226,6 +264,8 @@ export class Renderer {
       blur: rp(L.blur, blurMod, 'vsFull', 'fsBlur', [{ format: 'r32float' }]),
       comp: rp(L.comp, compMod, 'vsFull', 'fsComposite', [{ format: this.gpu.format }]),
       post: rp(L.post, postMod, 'vsFull', 'fsPost', [{ format: this.gpu.format }]),
+      media: rp(L.media, mediaMod, 'vsFull', 'fsMedia', [{ format: this.gpu.format }]),
+      build: rp(L.build, postMod, 'vsFull', 'fsBuild', [{ format: this.gpu.format }]),
       compLight: rp(L.comp, compMod, 'vsFull', 'fsCompositeLight', [{ format: this.gpu.format }, { format: HDR }]),
       bloomFirst: rp(L.bloom, bloomMod, 'vsFull', 'fsFirst', [{ format: HDR }]),
       bloomDown: rp(L.bloom, bloomMod, 'vsFull', 'fsDown', [{ format: HDR }]),
@@ -268,8 +308,17 @@ export class Renderer {
 
   removeMesh(name) {
     const m = this.meshes.get(name);
-    if (m) { m.vb.destroy(); if (m.uvb) m.uvb.destroy(); this.meshes.delete(name); }
+    if (m) { m.vb.destroy(); if (m.uvb) m.uvb.destroy(); if (m.rest) m.rest.destroy(); this.meshes.delete(name); }
   }
+
+  addSoftMesh(name, corners, rest) {
+    this.removeMesh(name);
+    const vb = this.device.createBuffer({ size: corners * 24, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, label: name });
+    const buf = this.device.createBuffer({ size: rest.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, label: name + ' at rest' });
+    this.device.queue.writeBuffer(buf, 0, rest);
+    this.meshes.set(name, { vb, uvb: null, rest: buf, count: corners });
+  }
+  writeSoftMesh(name, data) { const m = this.meshes.get(name); if (m) this.device.queue.writeBuffer(m.vb, 0, data); }
 
   ensureImageLayers(n) {
     const I = this.images, d = this.device;
@@ -353,6 +402,8 @@ export class Renderer {
     for (const t of Object.values(this.targets || {})) t.destroy();
     this.dropGlassPictures();
     this.dropBloom();
+    this.dropMedia();
+    this.dropBuild();
     const tex = (format, extra = 0) => d.createTexture({ size: [w, h], format,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | extra });
     this.targets = {
@@ -375,12 +426,40 @@ export class Renderer {
       makeGroup(d, this.L.blur, [this.frameBuf, this.dirX, V.fluidB]),
       makeGroup(d, this.L.blur, [this.frameBuf, this.dirY, V.fluidA]),
     ];
-    this.postGroup = makeGroup(d, this.L.post, [this.postBuf, V.post, this.linear, this.noGlass, this.noGlass]);
+    this.postGroup = makeGroup(d, this.L.post, [this.postBuf, V.post, this.linear, this.noGlass, this.noGlass, V.depth, V.fluidB]);
     this.outlineGroup = makeGroup(d, this.L.outline, [this.outlineBuf, V.pickMask]);
     this.groupCache = new Map();
   }
 
   setPost(p) { this.post = p ? { ...p } : null; }
+
+  setMedia(m) { this.media = m ? { ...m } : null; }
+  ensureMedia() {
+    if (this.mediaTex) return;
+    const d = this.device, size = [this.width, this.height];
+    this.mediaTex = d.createTexture({ size, format: this.gpu.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING, label: 'the picture, before its medium' });
+    this.mediaLast = d.createTexture({ size, format: this.gpu.format, usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING, label: 'the last frame shown' });
+    this.mediaView = this.mediaTex.createView();
+    this.mediaGroup = makeGroup(d, this.L.media, [this.mediaBuf, this.mediaView, this.linear, this.mediaLast.createView()]);
+  }
+  dropMedia() {
+    if (!this.mediaTex) return;
+    this.mediaTex.destroy();
+    this.mediaLast.destroy();
+    this.mediaTex = null;
+  }
+  ensureBuild() {
+    if (this.buildTex) return;
+    const d = this.device;
+    this.buildTex = d.createTexture({ size: [this.width, this.height], format: this.gpu.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING, label: 'the picture, before its cells' });
+    this.buildView = this.buildTex.createView();
+    this.buildGroup = makeGroup(d, this.L.build, [this.postBuf, this.buildView, this.linear]);
+  }
+  dropBuild() {
+    if (!this.buildTex) return;
+    this.buildTex.destroy();
+    this.buildTex = null;
+  }
 
   ensureBloom() {
     if (this.bloom) return;
@@ -391,7 +470,97 @@ export class Renderer {
     const level = Array.from({ length: levels }, (_, k) => spread.createView({ baseMipLevel: k, mipLevelCount: 1 }));
     const group = v => makeGroup(d, this.L.bloom, [this.bloomBuf, v, this.linear]);
     this.bloom = { light, spread, lightView, level, first: group(lightView), down: level.map(group),
-      post: makeGroup(d, this.L.post, [this.postBuf, this.views.post, this.linear, lightView, all]) };
+      post: makeGroup(d, this.L.post, [this.postBuf, this.views.post, this.linear, lightView, all, this.views.depth, this.views.fluidB]) };
+  }
+  filterPictures(jobs, w, h) {
+    const d = this.device, V = this.views, F = this.lastFrame;
+    if (!F) return jobs.map(() => null);
+    const T = this.ensureFilterPictures(w, h);
+    const spreadAny = jobs.some(j => j.post && wantsBloom(j.post));
+    if (spreadAny) this.ensureBloom();
+    if (jobs.some(j => j.media)) this.ensureMedia();
+    if (!F.kept || (spreadAny && !F.light)) {
+      const enc = d.createCommandEncoder({ label: 'the scene, for the filter pictures' });
+      const pass = enc.beginRenderPass({ colorAttachments: [{ view: V.post, clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' },
+        ...(spreadAny ? [{ view: this.bloom.lightView, clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' }] : [])] });
+      pass.setBindGroup(0, F.comp);
+      pass.setPipeline(spreadAny ? this.pipes.compLight : this.pipes.comp); pass.draw(3);
+      pass.end();
+      d.queue.submit([enc.finish()]);
+    }
+    F.kept = false;
+    return jobs.map(j => this.filterPicture(j.post, j.media, T));
+  }
+  filterPicture(post, media, T) {
+    const d = this.device, F = this.lastFrame, { w, h } = T;
+    const spread = post && wantsBloom(post);
+    const enc = d.createCommandEncoder({ label: 'a filter picture' });
+    const run = (view, group, pipe) => { const p = enc.beginRenderPass({ colorAttachments: [{ view, clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' }] }); p.setBindGroup(0, group); p.setPipeline(pipe); p.draw(3); p.end(); };
+    if (spread) {
+      d.queue.writeBuffer(this.bloomBuf, 0, new Float32Array(bloomNumbers(post)));
+      this.renderBloom(enc);
+    }
+    let last = 'scene';
+    if (post) {
+      const build = buildOn(post);
+      if (build) this.ensureBuild();
+      d.queue.writeBuffer(this.postBuf, 0, packPost(post, this.width, this.height, this.frameData[83], this.postData, [this.frameData[42], this.frameData[46], F.waterKnown]));
+      run(build ? this.buildView : media ? this.mediaView : T.fullView, spread ? this.bloom.post : this.postGroup, this.pipes.post);
+      if (build) run(media ? this.mediaView : T.fullView, this.buildGroup, this.pipes.build);
+      last = media ? 'media' : 'full';
+    }
+    if (media) {
+      d.queue.writeBuffer(this.mediaBuf, 0, packMedia({ ...media, ghost: 0 }, this.width, this.height, this.frameData[83], this.mediaData));
+      if (!T.mediaFromScene || T.mediaFor !== this.mediaTex) { T.mediaFromScene = makeGroup(d, this.L.media, [this.mediaBuf, this.views.post, this.linear, this.mediaLast.createView()]); T.mediaFor = this.mediaTex; }
+      run(T.fullView, last === 'media' ? this.mediaGroup : T.mediaFromScene, this.pipes.media);
+      last = 'full';
+    }
+    d.queue.writeBuffer(T.sizeBuf, 0, new Float32Array([w, h, 0, 0]));
+    run(T.smallView, last === 'full' ? T.group : T.fromScene, T.pipe);
+    const row = Math.ceil(w * 4 / 256) * 256, buf = d.createBuffer({ size: row * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ, label: 'a filter picture, read back' });
+    enc.copyTextureToBuffer({ texture: T.small }, { buffer: buf, bytesPerRow: row }, [w, h]);
+    d.queue.submit([enc.finish()]);
+    const bgra = this.gpu.format.startsWith('bgra');
+    return buf.mapAsync(GPUMapMode.READ).then(() => {
+      const src = new Uint8Array(buf.getMappedRange()), px = new Uint8ClampedArray(w * h * 4);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const a = y * row + x * 4, b = (y * w + x) * 4;
+        px[b] = src[a + (bgra ? 2 : 0)]; px[b + 1] = src[a + 1]; px[b + 2] = src[a + (bgra ? 0 : 2)]; px[b + 3] = 255;
+      }
+      buf.unmap(); buf.destroy();
+      return new ImageData(px, w, h);
+    });
+  }
+  ensureShrink() {
+    if (this.shrink) return;
+    const d = this.device, layout = makeLayout(d, ['uniform', 'tex2d', 'sampler'], 'render'), module = d.createShaderModule({ code: SHRINK_SHADER, label: 'shrink' });
+    this.shrink = { layout, module, sizeBuf: makeBuffer(d, 16, UNIFORM(), 'a filter picture: its size'),
+      pipe: d.createRenderPipeline({ layout: d.createPipelineLayout({ bindGroupLayouts: [layout] }), primitive: { topology: 'triangle-list' },
+        vertex: { module, entryPoint: 'vsFull' }, fragment: { module, entryPoint: 'fsShrink', targets: [{ format: this.gpu.format }] } }) };
+  }
+  ensureSceneCopy() {
+    const d = this.device;
+    this.ensureShrink();
+    if (!this.sceneCopy || this.sceneCopy.from !== this.views.post) {
+      const pipe = (this.sceneCopy && this.sceneCopy.pipe) || d.createRenderPipeline({ layout: d.createPipelineLayout({ bindGroupLayouts: [this.shrink.layout] }), primitive: { topology: 'triangle-list' },
+        vertex: { module: this.shrink.module, entryPoint: 'vsFull' }, fragment: { module: this.shrink.module, entryPoint: 'fsCopy', targets: [{ format: this.gpu.format }] } });
+      this.sceneCopy = { from: this.views.post, pipe, group: makeGroup(d, this.shrink.layout, [this.shrink.sizeBuf, this.views.post, this.linear]) };
+    }
+    return this.sceneCopy;
+  }
+  ensureFilterPictures(w, h) {
+    const d = this.device;
+    this.ensureShrink();
+    const T = this.filterPics;
+    if (T && T.W === this.width && T.H === this.height && T.w === w && T.h === h && T.scene === this.views.post) return T;
+    if (T) { T.full.destroy(); T.small.destroy(); }
+    const full = d.createTexture({ size: [this.width, this.height], format: this.gpu.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING, label: 'a filter picture' });
+    const small = d.createTexture({ size: [w, h], format: this.gpu.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC, label: 'a filter picture, small' });
+    const fullView = full.createView();
+    this.filterPics = { W: this.width, H: this.height, w, h, scene: this.views.post, full, small, fullView, smallView: small.createView(), pipe: this.shrink.pipe, sizeBuf: this.shrink.sizeBuf,
+      group: makeGroup(d, this.shrink.layout, [this.shrink.sizeBuf, fullView, this.linear]),
+      fromScene: makeGroup(d, this.shrink.layout, [this.shrink.sizeBuf, this.views.post, this.linear]) };
+    return this.filterPics;
   }
   dropBloom() {
     if (!this.bloom) return;
@@ -503,22 +672,24 @@ export class Renderer {
     const keyed = this.groupCache.get(dye) || new Map();
     this.groupCache.set(dye, keyed);
     let entry = keyed.get(field);
-    if (entry && entry.pos === pos && entry.water === water) return entry;
+    const whoS = smoke ? smoke.whoNow : this.noBuffer, whoW = particles && particles.who ? particles.who : this.noBuffer;
+    if (entry && entry.pos === pos && entry.water === water && entry.whoS === whoS && entry.whoW === whoW && entry.blockBuf === this.blockBuf && entry.artBuf === this.artBuf && entry.cellBuf === this.cellBuf) return entry;
     const d = this.device, V = this.views;
     entry = {
-      pos, water,
+      pos, water, whoS, whoW, blockBuf: this.blockBuf, artBuf: this.artBuf, cellBuf: this.cellBuf,
       fieldGroup: field ? makeGroup(d, this.L.field, [this.frameBuf, V.fluidRaw, field, this.linear, water, particles.foam]) : null,
       scene: makeGroup(d, this.L.scene, [this.frameBuf, this.drawBuf, pos, col, this.shadowView, this.compare, dye, light, this.linear, this.bgView, this.wrapping, this.lightShadowView,
         this.clearLightMaps ? this.clearLightMaps.view : this.noClearLight,
         this.matBuf, this.decalBuf, this.images.dataView, this.images.colorView, this.texSamp, this.envView, this.envSamp, smoke && smoke.localView ? smoke.localView : this.noLight,
-        this.caustic ? this.caustic.mapView : this.noCaustic]),
+        this.caustic ? this.caustic.mapView : this.noCaustic, this.fluidBuf, this.blockBuf, this.artBuf]),
       dispShadow: makeGroup(d, this.L.dispShadow, [this.matBuf, this.images.dataView, this.texSamp]),
-      shadow: makeGroup(d, this.L.shadow, [this.frameBuf, this.drawBuf, pos, col]),
-      fluid: makeGroup(d, this.L.fluid, [this.frameBuf, pos, col, V.depth, V.fieldThick]),
+      shadow: makeGroup(d, this.L.shadow, [this.frameBuf, this.drawBuf, pos, col, this.fluidBuf, this.blockBuf]),
+      fluid: makeGroup(d, this.L.fluid, [this.frameBuf, pos, col, V.depth, V.fieldThick, this.fluidBuf]),
       body: makeGroup(d, this.L.body, [this.frameBuf, V.fluidRaw, water, this.linear]),
       comp: makeGroup(d, this.L.comp, [this.frameBuf, V.color, V.depth, V.fluidB, V.thick, dye, light, this.linear, this.shadowView, this.compare, this.bgView, this.wrapping, sky, water, field || this.noDye, V.fieldThick,
         this.lightShadowView, smoke && smoke.localView ? smoke.localView : this.noLight,
-        this.glassPictures ? this.glassPictures.v.nearLight : this.noGlass, this.glassPictures ? this.glassPictures.v.nearTaken : this.noGlass]),
+        this.glassPictures ? this.glassPictures.v.nearLight : this.noGlass, this.glassPictures ? this.glassPictures.v.nearTaken : this.noGlass,
+        this.fluidBuf, whoS, whoW, this.artBuf, this.cellBuf]),
     };
     keyed.set(field, entry);
     return entry;
@@ -534,6 +705,8 @@ export class Renderer {
     const reach = o.shadowReach || 7;
     f.set(multiply(ortho(-reach, reach, -reach, reach, 1, 70), lv), 64);
     f[196] = reach * 2;
+    f[198] = o.smokeLook ? 1 : 0;
+    f[199] = o.waterOwn ? 1 : 0;
     f.set([...cam.eye, o.time], 80);
     f.set([this.width, this.height, 1 / this.width, 1 / this.height], 84);
     f.set([...key, L.key.soft], 88);
@@ -557,6 +730,7 @@ export class Renderer {
     const lq = o.liquidView;
     f.set([lq.look, lq.radius, lq.clarity, lq.soften || 0], 148);
     f.set([...lq.color, 1], 152);
+    f[155] = o.snap || 0;
     const lum = horizon[0] * 0.3 + horizon[1] * 0.6 + horizon[2] * 0.1;
     f.set([...(o.box ? o.box.min : [0, 0, 0]), o.box ? 1 : 0], 156);
     f.set([...(o.box ? o.box.max : [0, 0, 0]), lum > 0.25 ? 0.1 : 0.75], 160);
@@ -667,7 +841,9 @@ export class Renderer {
     const clear = glass.length > 0 || nP > 0;
     if (glass.length) this.ensureGlassPictures();
     if (clear) this.ensureClearLight(1 + (this.lightLayers || []).length);
+    d.queue.writeBuffer(this.fluidBuf, 0, o.fluidData);
     const G = this.groups(o.smoke, o.particles);
+    const blocks = o.blocks || null;
     const ts = (begin, end) => o.timestamps ? { timestampWrites: { querySet: o.timestamps,
       ...(begin !== undefined ? { beginningOfPassWriteIndex: begin } : {}),
       ...(end !== undefined ? { endOfPassWriteIndex: end } : {}) } } : {};
@@ -689,7 +865,7 @@ export class Renderer {
         drawOne(pass, i, dr, m);
       }
     };
-    const scenePipes = [this.pipes.obj, this.pipes.objTex, this.pipes.objUv, this.pipes.objDisp];
+    const scenePipes = [this.pipes.obj, this.pipes.objTex, this.pipes.objUv, this.pipes.objDisp, this.pipes.objSoft];
     const drawScene = pass => {
       let cur = -1;
       for (let i = 0; i < o.meshes.length; i++) {
@@ -698,6 +874,7 @@ export class Renderer {
         const kind = dr.kind === 2 && !m.uvb ? 1 : dr.kind || 0;
         if (kind !== cur) { pass.setPipeline(scenePipes[kind]); cur = kind; }
         if (kind === 2) pass.setVertexBuffer(1, m.uvb);
+        if (kind === 4) pass.setVertexBuffer(1, m.rest);
         drawOne(pass, i, dr, m);
       }
     };
@@ -721,6 +898,7 @@ export class Renderer {
       depthStencilAttachment: { view: this.shadowView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' }, ...ts(2) });
     pass.setBindGroup(0, G.shadow);
     drawShadows(pass, o.objectCount, G.dispShadow);
+    if (blocks) { pass.setPipeline(this.pipes.shadowBlock); pass.drawIndirect(blocks.args, 0); }
     pass.end();
     if (clear && this.frameData[92] + this.frameData[93] + this.frameData[94] > 0) clearLightPass(0, G.shadow, true);
 
@@ -735,11 +913,12 @@ export class Renderer {
       d.queue.writeBuffer(this.lightLayerBufs[k], 0, f2);
       const pos = o.particles ? o.particles.pos : this.noParticles, col = o.particles ? o.particles.col : this.noParticles;
       const gk = this.lightLayerGroups || (this.lightLayerGroups = []);
-      if (!gk[k] || gk[k].pos !== pos) gk[k] = { pos, group: makeGroup(d, this.L.shadow, [this.lightLayerBufs[k], this.drawBuf, pos, col]) };
+      if (!gk[k] || gk[k].pos !== pos || gk[k].blockBuf !== this.blockBuf) gk[k] = { pos, blockBuf: this.blockBuf, group: makeGroup(d, this.L.shadow, [this.lightLayerBufs[k], this.drawBuf, pos, col, this.fluidBuf, this.blockBuf]) };
       pass = encoder.beginRenderPass({ colorAttachments: [],
         depthStencilAttachment: { view: this.lightShadow.views[k], depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } });
       pass.setBindGroup(0, gk[k].group);
       drawShadows(pass, o.objectCount, G.dispShadow);
+      if (blocks) { pass.setPipeline(this.pipes.shadowBlock); pass.drawIndirect(blocks.args, 0); }
       pass.end();
       if (clear) clearLightPass(k + 1, gk[k].group, false);
     }
@@ -779,8 +958,10 @@ export class Renderer {
     pass.setPipeline(o.groundTex ? this.pipes.groundTex : this.pipes.ground); pass.draw(6);
     drawScene(pass);
     if (nP && o.look === 1) { pass.setPipeline(this.pipes.dots); pass.draw(6, nP); }
+    if (blocks) { pass.setPipeline(this.pipes.block); pass.drawIndirect(blocks.args, 0); }
     if (this.showBox) { pass.setPipeline(this.pipes.lines); pass.draw(24); }
     pass.setPipeline(this.pipes.sky); pass.draw(3);
+    if (blocks) { pass.setPipeline(this.pipes.blockClear); pass.drawIndirect(blocks.args, 16); }
     pass.end();
 
     if (glass.length) {
@@ -848,28 +1029,63 @@ export class Renderer {
       }
     }
 
+    if (o.cellsPass) o.cellsPass(encoder, V);
+
+    this.lastFrame = { comp: G.comp, waterKnown: nP > 0 && o.look >= 2 };
+
     this.screenTexture = this.context.getCurrentTexture();
     const screen = this.screenTexture.createView();
     const picked = o.picked || [], lastPass = picked.length ? {} : ts(undefined, 3);
     const spread = this.post && wantsBloom(this.post);
-    if (spread) this.ensureBloom();
-    pass = encoder.beginRenderPass({ colorAttachments: [{ view: this.post ? V.post : screen, clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' },
-      ...(spread ? [{ view: this.bloom.lightView, clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' }] : [])], ...(this.post ? {} : lastPass) });
+    const keep = !!o.keepScene, lightToo = spread || (keep && !!o.keepLight);
+    if (lightToo) this.ensureBloom();
+    const media = this.media;
+    if (media) this.ensureMedia();
+    const afterPost = media ? this.mediaView : screen;
+    pass = encoder.beginRenderPass({ colorAttachments: [{ view: this.post || keep ? V.post : afterPost, clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' },
+      ...(lightToo ? [{ view: this.bloom.lightView, clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' }] : [])], ...(this.post || media || keep ? {} : lastPass) });
     pass.setBindGroup(0, G.comp);
-    pass.setPipeline(spread ? this.pipes.compLight : this.pipes.comp); pass.draw(3);
+    pass.setPipeline(lightToo ? this.pipes.compLight : this.pipes.comp); pass.draw(3);
     pass.end();
+    if (keep && !this.post) {
+      const K = this.ensureSceneCopy();
+      pass = encoder.beginRenderPass({ colorAttachments: [{ view: afterPost, clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' }], ...(media ? {} : lastPass) });
+      pass.setBindGroup(0, K.group);
+      pass.setPipeline(K.pipe); pass.draw(3);
+      pass.end();
+    }
+    this.lastFrame.kept = keep;
+    this.lastFrame.light = lightToo;
     if (spread) {
       d.queue.writeBuffer(this.bloomBuf, 0, new Float32Array(bloomNumbers(this.post)));
       this.renderBloom(encoder);
     }
 
     if (this.post) {
-      d.queue.writeBuffer(this.postBuf, 0, packPost(this.post, this.width, this.height, this.frameData[83], this.postData));
-      pass = encoder.beginRenderPass({ colorAttachments: [{ view: screen, clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' }],
-        ...lastPass });
+      const build = buildOn(this.post);
+      if (build) this.ensureBuild();
+      d.queue.writeBuffer(this.postBuf, 0, packPost(this.post, this.width, this.height, this.frameData[83], this.postData,
+        [this.frameData[42], this.frameData[46], nP > 0 && o.look >= 2]));
+      pass = encoder.beginRenderPass({ colorAttachments: [{ view: build ? this.buildView : afterPost, clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' }],
+        ...(media || build ? {} : lastPass) });
       pass.setBindGroup(0, spread ? this.bloom.post : this.postGroup);
       pass.setPipeline(this.pipes.post); pass.draw(3);
       pass.end();
+      if (build) {
+        pass = encoder.beginRenderPass({ colorAttachments: [{ view: afterPost, clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' }], ...(media ? {} : lastPass) });
+        pass.setBindGroup(0, this.buildGroup);
+        pass.setPipeline(this.pipes.build); pass.draw(3);
+        pass.end();
+      }
+    }
+
+    if (media) {
+      d.queue.writeBuffer(this.mediaBuf, 0, packMedia(media, this.width, this.height, this.frameData[83], this.mediaData));
+      pass = encoder.beginRenderPass({ colorAttachments: [{ view: screen, clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' }], ...lastPass });
+      pass.setBindGroup(0, this.mediaGroup);
+      pass.setPipeline(this.pipes.media); pass.draw(3);
+      pass.end();
+      if (media.ghost > 0) encoder.copyTextureToTexture({ texture: this.screenTexture }, { texture: this.mediaLast }, [this.width, this.height]);
     }
 
     if (picked.length) {

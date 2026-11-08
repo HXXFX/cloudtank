@@ -212,11 +212,13 @@ export function text(o) {
 export function pick(o) {
   const sel = el('select', { 'aria-label': o.label });
   sel.addEventListener('change', () => { if (sel.value === '\u0000') return; o.set(sel.value === '' ? null : sel.value); o.commit && o.commit(); row.paint(); });
-  const row = el('div', { class: 'row stack', title: o.help }, el('label', {}, o.label), sel);
+  const row = el('div', { class: o.inline ? 'row pickrow' : 'row stack', title: o.help }, el('label', {}, o.label), sel);
   let arrow = () => {};
+  const optionOf = ([x, t]) => el('option', { value: x ?? '', title: o.titles ? o.titles[x] : undefined }, t);
   row.paint = () => {
     const opts = typeof o.options === 'function' ? o.options() : o.options, v = o.get(), mixed = v === MIXED;
-    sel.replaceChildren(...(mixed ? [el('option', { value: '\u0000' }, 'Mixed')] : []), ...opts.map(([x, t]) => el('option', { value: x ?? '' }, t)));
+    sel.replaceChildren(...(mixed ? [el('option', { value: '\u0000' }, 'Mixed')] : []), ...opts.map(it => (Array.isArray(it[1]) ? el('optgroup', { label: it[0] }, it[1].map(optionOf)) : optionOf(it))));
+    sel.title = (o.titles && o.titles[v]) || '';
     sel.value = mixed ? '\u0000' : v == null ? '' : String(v);
     arrow();
   };

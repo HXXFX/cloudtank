@@ -20,6 +20,7 @@ struct SP {
 ` + SOLVER_GROUP0('SP') +  `
 
 fn N() -> vec3<i32> { return vec3<i32>(P.dims.xyz); }
+fn cellIdx(c: vec3<i32>) -> u32 { return u32(c.x + i32(P.dims.x) * (c.y + i32(P.dims.y) * c.z)); }
 fn inside(c: vec3<i32>) -> bool { return all(c >= vec3<i32>(0)) && all(c < N()); }
 fn worldOf(c: vec3<i32>) -> vec3<f32> { return P.origin.xyz + (vec3<f32>(c) + 0.5) * P.dims.w; }
 fn uvw(q: vec3<f32>) -> vec3<f32> { return (q + 0.5) / P.dims.xyz; }
@@ -102,6 +103,7 @@ const CORRECT_V =  `
 @group(1) @binding(2) var velFwd: texture_3d<f32>;
 @group(1) @binding(3) var solid: texture_3d<f32>;
 @group(1) @binding(4) var velOut: texture_storage_3d<rgba16float, write>;
+@group(1) @binding(5) var<storage, read> who: array<u32>;
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   let c = vec3<i32>(g);
@@ -129,7 +131,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
               + textureLoad(velOld, clamp(c + Y, vec3<i32>(0), m), 0) + textureLoad(velOld, clamp(c - Y, vec3<i32>(0), m), 0)
               + textureLoad(velOld, clamp(c + Z, vec3<i32>(0), m), 0) + textureLoad(velOld, clamp(c - Z, vec3<i32>(0), m), 0)) / 6.0;
   nv = nv + P.misc2 * (around - old);
-  nv.w = min(nv.w * exp(-P.forces.w * dt), 6.0);
+  nv.w = min(nv.w * exp(-FT[who[cellIdx(c)]].a.y * dt), 6.0);
   textureStore(velOut, c, nv);
 }`;
 
@@ -154,6 +156,7 @@ const FORCES =  `
 @group(1) @binding(2) var dyeIn: texture_3d<f32>;
 @group(1) @binding(3) var solid: texture_3d<f32>;
 @group(1) @binding(4) var velOut: texture_storage_3d<rgba16float, write>;
+@group(1) @binding(5) var<storage, read> who: array<u32>;
 fn W(c: vec3<i32>) -> f32 { return textureLoad(curlIn, clamp(c, vec3<i32>(0), N() - vec3<i32>(1)), 0).w; }
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) g: vec3<u32>) {
@@ -164,13 +167,14 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   let dt = P.origin.w;
   var v = textureLoad(velIn, c, 0);
   let dens = amountOf(textureLoad(dyeIn, c, 0));
+  let own = who[cellIdx(c)];
   let grad = vec3<f32>(W(c + X) - W(c - X), W(c + Y) - W(c - Y), W(c + Z) - W(c - Z));
   let gl = length(grad);
   if (gl > 1e-5) {
     let w = textureLoad(curlIn, c, 0).xyz;
-    v = vec4<f32>(v.xyz + dt * P.forces.z * P.dims.w * smoothstep(0.0, 0.05, dens) * cross(grad / gl, w), v.w);
+    v = vec4<f32>(v.xyz + dt * FT[own].b.x * P.dims.w * smoothstep(0.0, 0.05, dens) * cross(grad / gl, w), v.w);
   }
-  v.y = v.y + dt * (P.forces.x * v.w - P.forces.y * dens);
+  v.y = v.y + dt * (FT[own].a.z * v.w - FT[own].a.w * dens);
   let p = worldOf(c);
   for (var i = 0u; i < u32(P.misc.y); i = i + 1u) {
     let e = E[i];
@@ -279,15 +283,17 @@ const SMOKE_FLOW =  `
 fn NF() -> vec3<i32> { return N() * i32(P.fine.x); }
 fn fineCell() -> f32 { return P.dims.w / P.fine.x; }
 fn uvwOf(c: vec3<i32>) -> vec3<f32> { return (vec3<f32>(c) + 0.5) / vec3<f32>(NF()); }
+fn detailAt(q: vec3<f32>) -> f32 { return FT[who[cellIdx(clamp(vec3<i32>(q * P.dims.xyz), vec3<i32>(0), N() - vec3<i32>(1)))]].b.y; }
 fn flowAt(q: vec3<f32>) -> vec3<f32> {
   let v = textureSampleLevel(velIn, samp, q, 0.0).xyz;
-  if (P.fine.y <= 0.0) { return v; }
+  let detail = detailAt(q);
+  if (detail <= 0.0) { return v; }
   let speed = length(v) + 0.1;
   let w = q * P.dims.xyz;
   let t = P.fine.z;
   let a = textureSampleLevel(swirls, swirlSamp, w / 7.5 + vec3<f32>(0.11, -0.37, 0.19) * t, 0.0).xyz;
   let b = textureSampleLevel(swirls, swirlSamp, w / 3.75 + vec3<f32>(-0.23, -0.71, 0.13) * t, 0.0).xyz;
-  return v + (a + 0.6 * b) * speed * 0.45 * P.fine.y;
+  return v + (a + 0.6 * b) * speed * 0.45 * detail;
 }
 `;
 const ADVECT_DYE =  `
@@ -298,6 +304,7 @@ const ADVECT_DYE =  `
 @group(1) @binding(4) var dyeOut: texture_storage_3d<rgba16float, write>;
 @group(1) @binding(5) var swirls: texture_3d<f32>;
 @group(1) @binding(6) var swirlSamp: sampler;
+@group(1) @binding(7) var<storage, read> who: array<u32>;
 ` + SMOKE_FLOW +  `
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) g: vec3<u32>) {
@@ -317,6 +324,7 @@ const CORRECT_DYE =  `
 @group(1) @binding(5) var dyeOut: texture_storage_3d<rgba16float, write>;
 @group(1) @binding(6) var swirls: texture_3d<f32>;
 @group(1) @binding(7) var swirlSamp: sampler;
+@group(1) @binding(8) var<storage, read> who: array<u32>;
 ` + SMOKE_FLOW +  `
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) g: vec3<u32>) {
@@ -342,7 +350,8 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
     hi = max(hi, s);
   }
   d = clamp(d, lo, hi);
-  d = d * exp(-P.misc.x * dt);
+  let own = who[cellIdx(clamp(c / i32(P.fine.x), vec3<i32>(0), N() - vec3<i32>(1)))];
+  d = d * exp(-FT[own].a.x * dt);
   let p = P.origin.xyz + (vec3<f32>(c) + 0.5) * h;
   for (var i = 0u; i < u32(P.misc.y); i = i + 1u) {
     let e = E[i];
@@ -352,7 +361,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
     if (f > 0.0) {
       let t = P.fine.z;
       let patchy = textureSampleLevel(swirls, swirlSamp, p / (max(e.a.w, 0.03) * 5.0) + vec3<f32>(0.0, -0.3, 0.17) * t + e.a.xyz, 0.0).x;
-      d = d + smokeOf(e.b.rgb) * (e.b.w * f * dt * clamp(1.0 + 1.6 * patchy * min(P.fine.y, 1.0), 0.1, 2.0));
+      d = d + smokeOf(e.b.rgb) * (e.b.w * f * dt * clamp(1.0 + 1.6 * patchy * min(FT[u32(e.d.w)].b.y, 1.0), 0.1, 2.0));
     }
   }
   if (c.x == 0 || c.z == 0 || c.x == n.x - 1 || c.y == n.y - 1 || c.z == n.z - 1) { d = d * 0.8; }
@@ -458,20 +467,57 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   textureStore(localOut, c + vec3<i32>(0, 0, 2 * hz + 2), b);
 }`;
 
+const WHO =  `
+@group(1) @binding(0) var velIn: texture_3d<f32>;
+@group(1) @binding(1) var<storage, read> whoIn: array<u32>;
+@group(1) @binding(2) var<storage, read_write> whoOut: array<u32>;
+@group(1) @binding(3) var dyeNow: texture_3d<f32>;
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+  let c = vec3<i32>(g);
+  if (!inside(c)) { return; }
+  let moved = P.origin.w * textureLoad(velIn, c, 0).xyz / P.dims.w;
+  let r = hash3(g.x + g.y * 1009u + g.z * 1000003u + u32(P.light.w) * 7919u);
+  let up = vec3<i32>(floor(vec3<f32>(c) + 0.5 - moved + r - 0.5));
+  var id = 0u;
+  if (inside(up)) { id = whoIn[cellIdx(up)]; }
+  if (amountOf(textureLoad(dyeNow, c, 0)) < 5e-4) { id = 0u; }
+  else if (id == 0u) {
+    var most = 0.0;
+    for (var k = 0u; k < 3u; k = k + 1u) {
+      for (var s = -1; s <= 1; s = s + 2) {
+        var q = c;
+        q[k] = q[k] + s;
+        if (!inside(q)) { continue; }
+        let v = whoIn[cellIdx(q)];
+        let a = amountOf(textureLoad(dyeNow, q, 0));
+        if (v != 0u && a > most) { most = a; id = v; }
+      }
+    }
+  }
+  let p = worldOf(c);
+  for (var i = 0u; i < u32(P.misc.y); i = i + 1u) {
+    let e = E[i];
+    if (e.d.x == 1.0 && emitterWeight(p, e) > 0.02) { id = u32(e.d.w); }
+  }
+  whoOut[cellIdx(c)] = id;
+}`;
+
 const PASSES = {
   solid: [SOLID, ['store3d:rgba16float']],
   advectV: [ADVECT_V, ['tex3d', 'sampler', 'tex3d', 'store3d:rgba16float']],
-  correctV: [CORRECT_V, ['tex3d', 'sampler', 'tex3d', 'tex3d', 'store3d:rgba16float']],
+  correctV: [CORRECT_V, ['tex3d', 'sampler', 'tex3d', 'tex3d', 'store3d:rgba16float', 'read']],
   curl: [CURL, ['tex3d', 'store3d:rgba16float']],
-  forces: [FORCES, ['tex3d', 'tex3d', 'tex3d', 'tex3d', 'store3d:rgba16float']],
+  forces: [FORCES, ['tex3d', 'tex3d', 'tex3d', 'tex3d', 'store3d:rgba16float', 'read']],
   div: [DIVERGENCE, ['tex3d', 'tex3d', 'store3d:r32float']],
   jacobi: [JACOBI, ['tex3d-u', 'tex3d-u', 'tex3d', 'store3d:r32float']],
   project: [PROJECT, ['tex3d', 'tex3d-u', 'tex3d', 'store3d:rgba16float']],
-  advectD: [ADVECT_DYE, ['tex3d', 'sampler', 'tex3d', 'tex3d', 'store3d:rgba16float', 'tex3d', 'sampler']],
-  correctD: [CORRECT_DYE, ['tex3d', 'sampler', 'tex3d', 'tex3d', 'tex3d', 'store3d:rgba16float', 'tex3d', 'sampler']],
+  advectD: [ADVECT_DYE, ['tex3d', 'sampler', 'tex3d', 'tex3d', 'store3d:rgba16float', 'tex3d', 'sampler', 'read']],
+  correctD: [CORRECT_DYE, ['tex3d', 'sampler', 'tex3d', 'tex3d', 'tex3d', 'store3d:rgba16float', 'tex3d', 'sampler', 'read']],
   down: [DYE_DOWN, ['tex3d', 'store3d:rgba16float']],
   light: [LIGHT, ['tex3d', 'sampler', 'store3d:rgba16float', 'store3d:rgba8unorm']],
   local: [LOCAL, ['tex3d', 'sampler', 'uniform', 'store3d:rgba16float']],
+  who: [WHO, ['tex3d', 'read', 'storage', 'tex3d']],
 };
 
 const CARRY =  `
@@ -495,12 +541,29 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   if (all(q >= vec3<f32>(0.0)) && all(q <= C.od.xyz)) { v = textureSampleLevel(from3, samp, q / C.od.xyz, 0.0); }
   textureStore(to3, c, v);
 }`;
+const CARRY_WHO =  `
+struct CP { o: vec4<f32>, od: vec4<f32>, n: vec4<f32>, nd: vec4<f32> };
+@group(0) @binding(0) var<uniform> C: CP;
+@group(0) @binding(1) var<storage, read> whoOld: array<u32>;
+@group(0) @binding(2) var<storage, read_write> whoNew: array<u32>;
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+  let c = vec3<i32>(g);
+  if (any(c >= vec3<i32>(C.nd.xyz))) { return; }
+  let q = vec3<i32>(floor((C.n.xyz + (vec3<f32>(c) + 0.5) * C.n.w - C.o.xyz) / C.o.w));
+  let od = vec3<i32>(C.od.xyz);
+  var id = 0u;
+  if (all(q >= vec3<i32>(0)) && all(q < od)) { id = whoOld[u32(q.x + od.x * (q.y + od.y * q.z))]; }
+  whoNew[u32(c.x + i32(C.nd.x) * (c.y + i32(C.nd.y) * c.z))] = id;
+}`;
 const carryPipes = new WeakMap();
 async function carryPipe(d) {
   if (!carryPipes.has(d)) {
     const layout = makeLayout(d, ['uniform', 'tex3d', 'sampler', 'store3d:rgba16float']);
     const module = await shaderModule(d, CARRY, 'smoke carry');
-    carryPipes.set(d, { layout, pipe: computePipeline(d, module, [layout], 'main', 'smoke carry') });
+    const whoLayout = makeLayout(d, ['uniform', 'read', 'storage']);
+    const whoModule = await shaderModule(d, CARRY_WHO, 'smoke carry, which fluid');
+    carryPipes.set(d, { layout, pipe: computePipeline(d, module, [layout], 'main', 'smoke carry'), whoLayout, whoPipe: computePipeline(d, whoModule, [whoLayout], 'main', 'smoke carry, which fluid') });
   }
   return carryPipes.get(d);
 }
@@ -588,8 +651,9 @@ export class Smoke {
       addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge', addressModeW: 'clamp-to-edge' });
     this.paramBuf = makeBuffer(d, this.params.byteLength, UNIFORM(), 'smoke settings');
 
-    const l0 = makeLayout(d, ['uniform', 'uniform', 'uniform', 'tex3d', 'sampler']);
-    this.group0 = makeGroup(d, l0, [this.paramBuf, this.shared.emitters, this.shared.objects, this.shared.atlasView, this.shared.atlasSampler]);
+    const l0 = makeLayout(d, ['uniform', 'uniform', 'uniform', 'tex3d', 'sampler', 'uniform']);
+    this.group0 = makeGroup(d, l0, [this.paramBuf, this.shared.emitters, this.shared.objects, this.shared.atlasView, this.shared.atlasSampler, this.shared.fluids]);
+    this.who = [0, 1].map(k => makeBuffer(d, this.cellCount * 4, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC, 'which smoke where ' + k));
     this.pipes = {};
     this.layouts = {};
     for (const [name, [code, spec]] of Object.entries(PASSES)) {
@@ -604,18 +668,19 @@ export class Smoke {
       g('jacobi', [v(T.p[1]), v(T.div), sv, v(T.p[0])]),
     ] };
     this.byParity = [0, 1].map(k => {
-      const V0 = v(T.vel[k]), V1 = v(T.vel[1 - k]), D1 = v(T.dye[1 - k]), F0 = v(T.fine[k]), F1 = v(T.fine[1 - k]), VF = v(T.velFwd);
+      const V0 = v(T.vel[k]), V1 = v(T.vel[1 - k]), D1 = v(T.dye[1 - k]), F0 = v(T.fine[k]), F1 = v(T.fine[1 - k]), VF = v(T.velFwd), W0 = this.who[k];
       return {
         advectV: g('advectV', [V0, S, sv, VF]),
-        correctV: g('correctV', [V0, S, VF, sv, V1]),
+        correctV: g('correctV', [V0, S, VF, sv, V1, W0]),
         curl: g('curl', [V1, v(T.curl)]),
-        forces: g('forces', [V1, v(T.curl), v(T.dye[k]), sv, V0]),
+        forces: g('forces', [V1, v(T.curl), v(T.dye[k]), sv, V0, W0]),
         div: g('div', [V0, sv, v(T.div)]),
         project: g('project', [V0, v(T.p[0]), sv, V1]),
-        advectD: g('advectD', [F0, S, V1, sv, v(T.dyeFwd), sw.view, sw.sampler]),
-        correctD: g('correctD', [F0, S, v(T.dyeFwd), V1, sv, F1, sw.view, sw.sampler]),
+        advectD: g('advectD', [F0, S, V1, sv, v(T.dyeFwd), sw.view, sw.sampler, W0]),
+        correctD: g('correctD', [F0, S, v(T.dyeFwd), V1, sv, F1, sw.view, sw.sampler, W0]),
         down: by > 1 ? g('down', [F1, D1]) : null,
         light: g('light', [D1, S, v(T.light), v(T.sky)]),
+        who: g('who', [V1, W0, this.who[1 - k], D1]),
       };
     });
     this.localBuf = makeBuffer(d, 64, UNIFORM(), 'placed lights for smoke');
@@ -631,6 +696,7 @@ export class Smoke {
   reset() {
     const q = this.device.queue;
     const [x, y, z] = this.dims;
+    for (const b of this.who) q.writeBuffer(b, 0, new Uint8Array(x * y * z * 4));
     const zero8 = new Uint8Array(x * y * z * 8), zero4 = new Uint8Array(x * y * z * 4);
     const write = (t, data, bpp) => q.writeTexture({ texture: t }, data, { bytesPerRow: x * bpp, rowsPerImage: y }, [x, y, z]);
     for (const t of [...this.tex.vel, this.tex.velFwd, ...this.tex.dye, this.tex.solid, this.tex.curl]) write(t, zero8, 8);
@@ -674,6 +740,14 @@ export class Smoke {
     one(old.tex.vel[old.k], this.tex.vel[0], this.cell, this.dims);
     one(old.tex.fine[old.k], this.tex.fine[0], this.cell / this.fineBy, this.dims.map(n => n * this.fineBy));
     if (this.fineBy > 1) one(old.tex.dye[old.k], this.tex.dye[0], this.cell, this.dims);
+    {
+      const u = makeBuffer(d, 64, UNIFORM(), 'smoke carry settings');
+      bufs.push(u);
+      d.queue.writeBuffer(u, 0, new Float32Array([...old.min, old.cell, ...old.dims, 0, ...this.min, this.cell, ...this.dims, 0]));
+      pass.setPipeline(c.whoPipe);
+      pass.setBindGroup(0, makeGroup(d, c.whoLayout, [u, old.who[old.k], this.who[0]], 'smoke carry, which fluid'));
+      pass.dispatchWorkgroups(...this.dims.map(n => Math.ceil(n / 4)));
+    }
     pass.end();
     d.queue.submit([enc.finish()]);
     d.queue.onSubmittedWorkDone().then(() => bufs.forEach(u => u.destroy()));
@@ -681,6 +755,7 @@ export class Smoke {
   }
 
   get dyeView() { return this.dyeViews[this.k]; }
+  get whoNow() { return this.who[this.k]; }
 
   get cellCount() { return this.dims[0] * this.dims[1] * this.dims[2]; }
 
@@ -688,6 +763,7 @@ export class Smoke {
     for (const t of Object.values(this.tex).flat()) t.destroy();
     this.paramBuf.destroy();
     if (this.localBuf) this.localBuf.destroy();
+    for (const b of this.who) b.destroy();
   }
 
   writeParams(s) {
@@ -735,6 +811,7 @@ export class Smoke {
     runFine('correctD', G.correctD);
     if (G.down) run('down', G.down);
     run('light', G.light);
+    run('who', G.who);
     this.k = 1 - this.k;
   }
 }

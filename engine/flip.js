@@ -98,7 +98,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   let ang = r.x * 6.2831853;
   let rad = sqrt(r.y) * e.a.w;
   let p = e.a.xyz + (ax * cos(ang) + ay * sin(ang)) * rad + dir * (r.z * speed * P.c.x);
-  pos[slot] = vec4<f32>(p, 0.0);
+  pos[slot] = vec4<f32>(p, -e.d.w);
   vel[slot] = vec4<f32>(e.c.xyz, 0.0);
   col[slot] = vec4<f32>(dyeOf(e.b.rgb), 0.0);
 }`;
@@ -349,7 +349,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   let v = vel[i].xyz;
   let q = (p - P.origin.xyz) / P.dims.w;
   let n = G();
-  let flip = P.a.y;
+  let flip = FT[u32(-pos[i].w)].b.z;
   var nv = v;
   var jostle = vec3<f32>(0.0);
   for (var k = 0u; k < 3u; k = k + 1u) {
@@ -368,6 +368,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
     let rate = P.c.y * length(jostle) / P.dims.w;
     dye = mix(dye, around.xyz / around.w, 1.0 - exp(-rate * P.origin.w));
   }
+  let p0 = p;
   p = p + nv * P.origin.w;
   let count = u32(P.b.y);
   let r = P.b.w;
@@ -375,10 +376,23 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   var touchN = vec3<f32>(0.0, 1.0, 0.0);
   var touchV = vec3<f32>(0.0);
   if (count > 0u) {
-    let hit = sceneSdf(p, count);
+    var hit = sceneSdf(p, count);
+    if (hit.x >= r && dot(p - p0, p - p0) > 0.25 * P.dims.w * P.dims.w) {
+      let mid = 0.5 * (p0 + p);
+      let hm = sceneSdf(mid, count);
+      if (hm.x < r && O[u32(hm.y)].h.w < -0.5) { p = mid; hit = hm; }
+    }
     if (hit.x < r) {
-      let nrm = sceneNormal(p, count);
-      p = p + nrm * (r - hit.x);
+      var nrm = sceneNormal(p, count);
+      var lift = r - hit.x;
+      if (O[u32(hit.y)].h.w < -0.5 && dot(nrm, p0 - p) < 0.0) {
+        let was = sceneSdf(p0, count);
+        if (was.x > hit.x) {
+          let n0 = sceneNormal(p0, count);
+          if (dot(n0, nrm) < 0.0) { nrm = n0; lift = max(r - was.x - dot(p - p0, n0), 0.0); }
+        }
+      }
+      p = p + nrm * lift;
       let ov = solidVelAt(p, O[u32(hit.y)]);
       let vn = dot(nv - ov, nrm);
       if (vn < 0.0) { nv = nv - nrm * vn; }
@@ -404,7 +418,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   let knock = length(nv - v) + 0.1 * length(jostle);
   let foam = min(col[i].w * exp(-P.origin.w / 1.1) + 0.45 * smoothstep(0.32, 1.1, knock), 1.0);
   col[i] = vec4<f32>(dye, foam);
-  pos[i] = vec4<f32>(p, 0.0);
+  pos[i] = vec4<f32>(p, pos[i].w);
   vel[i] = vec4<f32>(nv, 0.0);
 }`;
 
@@ -441,10 +455,20 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   var state = 0u;
   var drops = 0;
   for (var j = 0; j < ny; j = j + 1) { drops = drops + atomicLoad(&acc[6u * n + idx(vec3<i32>(x, j, z))]); }
+  var solidBelow = false;
+  var onIt = 0.0;
+  var resting = true;
   for (var j = 0; j < ny; j = j + 1) {
     let c = vec3<i32>(x, j, z);
     let t = cell[idx(c)];
-    if (t == 2u) { out = vec4<f32>(-2.0, 0.0, 0.0, 0.0); break; }
+    if (solidBelow) {
+      if (!resting) { continue; }
+      if (t != 1u) { if (onIt > 0.0) { resting = false; } continue; }
+      let vy = 0.5 * (grid[n + idx(c)] + grid[n + idx(c + Y)]);
+      if (vy > -1.0) { onIt = onIt + P.dims.w; } else { resting = false; }
+      continue;
+    }
+    if (t == 2u) { out = vec4<f32>(-2.0, 0.0, 0.0, 0.0); solidBelow = true; continue; }
     if (t == 1u && state < 2u) {
       state = 1u;
       out = vec4<f32>(P.origin.y + f32(j + 1) * P.dims.w,
@@ -452,6 +476,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
         0.5 * (grid[2u * n + idx(c)] + grid[2u * n + idx(c + Z)]), 0.0);
     } else if (t == 0u && state == 1u) { state = 2u; }
   }
+  if (solidBelow) { out.x = -2.0 - onIt; }
   out.w = f32(drops);
   cols[i] = out;
 }`;
@@ -459,6 +484,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
 const LOOK =  `
 @group(2) @binding(0) var lookOut: texture_storage_3d<rgba16float, write>;
 @group(2) @binding(1) var foamOut: texture_storage_3d<rgba8unorm, write>;
+@group(2) @binding(2) var<storage, read> who: array<u32>;
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   let c = vec3<i32>(g);
@@ -473,9 +499,29 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
     let sums = vec3<f32>(f32(atomicLoad(&acc[7u * n + id])), f32(atomicLoad(&acc[8u * n + id])), f32(atomicLoad(&acc[9u * n + id])));
     out = vec4<f32>(sums / (SCALE * count) * fill, fill);
     foam = f32(atomicLoad(&acc[10u * n + id])) / (SCALE * count);
+    if (FT[who[u32(c.x + i32(P.dims.x) * (c.y + i32(P.dims.y) * c.z))] & 63u].c.w == 1.0) { out = vec4<f32>(out.rgb / max(fill, 1e-4), 0.0); foam = 0.0; }
   }
   textureStore(lookOut, c, out);
   textureStore(foamOut, c, vec4<f32>(foam, 0.0, 0.0, 1.0));
+}`;
+
+const WHO_CLEAR =  `
+@group(2) @binding(0) var<storage, read_write> who: array<atomic<u32>>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+  if (g.x >= u32(P.dims.x * P.dims.y * P.dims.z)) { return; }
+  atomicStore(&who[g.x], 0u);
+}`;
+const WHO_FILL =  `
+@group(2) @binding(0) var<storage, read_write> who: array<atomic<u32>>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = g.x;
+  if (i >= u32(P.b.x)) { return; }
+  let q = pos[i];
+  if (q.w > 0.5) { return; }
+  let c = clamp(vec3<i32>(floor((q.xyz - P.origin.xyz) / P.dims.w)), vec3<i32>(0), dimsI() - vec3<i32>(1));
+  atomicMax(&who[u32(c.x + i32(P.dims.x) * (c.y + i32(P.dims.y) * c.z))], (pcg(i) & 0xFFFFFFC0u) | u32(-q.w));
 }`;
 
 export const FIELD = { R: 2.0, r: 0.45, fine: 2, soften: 1.0, calm: 0.9 };
@@ -502,6 +548,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   if (i >= u32(FQ.k.z)) { return; }
   let p4 = pos[i];
   if (p4.w > 0.5) { return; }
+  if (FT[u32(-p4.w)].c.w == 1.0) { return; }
   let q = (p4.xyz - FQ.origin.xyz) / FQ.dims.w - vec3<f32>(0.5);
   let R = FQ.k.x;
   let b = vec3<i32>(ceil(q - vec3<f32>(R)));
@@ -609,7 +656,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
 }`;
 
 const PASSES = { clear: CLEAR, emit: EMIT, p2g: P2G, normalize: NORMALIZE, boundary: BOUNDARY, pressure: PRESSURE(false), pressureSink: PRESSURE(true),
-  g2p: G2P, drain: DRAIN, columns: COLUMNS, look: LOOK, fieldClear: FIELD_CLEAR, fieldSplat: FIELD_SPLAT, fieldTex: FIELD_TEX, fieldRound: FIELD_ROUND, fieldSmooth: FIELD_SMOOTH };
+  g2p: G2P, drain: DRAIN, columns: COLUMNS, look: LOOK, whoClear: WHO_CLEAR, whoFill: WHO_FILL, fieldClear: FIELD_CLEAR, fieldSplat: FIELD_SPLAT, fieldTex: FIELD_TEX, fieldRound: FIELD_ROUND, fieldSmooth: FIELD_SMOOTH };
 
 const CARRY =  `
 struct CP {
@@ -729,6 +776,7 @@ export class Flip {
       acc: makeBuffer(d, G * 11 * 4, STORAGE(), 'liquid grid sums'),
       grid: makeBuffer(d, G * 9 * 4, STORAGE(), 'liquid grid'),
       cell: makeBuffer(d, G * 4, STORAGE(), 'liquid cell kinds'),
+      who: makeBuffer(d, this.cells * 4, STORAGE(), 'which water where'),
       cols: makeBuffer(d, this.dims[0] * this.dims[2] * 16, STORAGE(), 'water level by column'),
       list: makeBuffer(d, (G + 1) * 4, STORAGE(), 'water cells'),
       listArgs: makeBuffer(d, 16, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT, 'water cells, sweeps to run'),
@@ -745,19 +793,21 @@ export class Flip {
     d.queue.writeBuffer(this.parityBuf, 0, new Uint32Array([0, 0, 0, 0]));
     d.queue.writeBuffer(this.parityBuf, 256, new Uint32Array([1, 0, 0, 0]));
 
-    const l0 = makeLayout(d, ['uniform', 'uniform', 'uniform', 'tex3d', 'sampler']);
+    const l0 = makeLayout(d, ['uniform', 'uniform', 'uniform', 'tex3d', 'sampler', 'uniform']);
     const l1 = makeLayout(d, ['storage', 'storage', 'storage', 'storage', 'storage', 'storage', 'storage']);
+    const lW = makeLayout(d, ['storage']);
     const l2 = makeLayout(d, ['uniform-dyn', 'read']);
     const lL = makeLayout(d, ['uniform', 'read', 'storage', 'storage']);
-    const l3 = makeLayout(d, ['store3d:rgba16float', 'store3d:rgba8unorm']);
+    const l3 = makeLayout(d, ['store3d:rgba16float', 'store3d:rgba8unorm', 'read']);
     const lF = makeLayout(d, ['uniform', 'storage', 'store3d:r32float']);
     const lS = makeLayout(d, ['uniform', 'tex3d-u', 'tex3d-u', 'store3d:rgba16float']);
     const lR = makeLayout(d, ['uniform', 'tex3d-u', 'store3d:r32float']);
     this.lF = lF;
     this.lS = lS;
     this.lR = lR;
-    this.group0 = makeGroup(d, l0, [this.paramBuf, this.shared.emitters, this.shared.objects, this.shared.atlasView, this.shared.atlasSampler]);
+    this.group0 = makeGroup(d, l0, [this.paramBuf, this.shared.emitters, this.shared.objects, this.shared.atlasView, this.shared.atlasSampler, this.shared.fluids]);
     const b = this.buf;
+    this.whoGroup = makeGroup(d, lW, [b.who]);
     this.group1 = makeGroup(d, l1, [b.pos, b.vel, b.col, b.acc, b.grid, b.cell, b.cols]);
     this.colsRead = d.createBuffer({ size: this.dims[0] * this.dims[2] * 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ, label: 'water level, read back' });
     this.colsBusy = false;
@@ -765,11 +815,11 @@ export class Flip {
     this.listGroup = makeGroup(d, lL, [this.paramBuf, b.cell, b.list, b.listArgs]);
     const listModule = await shaderModule(d, LIST, 'water cells');
     this.listPipes = Object.fromEntries(['start', 'build', 'finish'].map(e => [e, computePipeline(d, listModule, [lL], e, 'water cells ' + e)]));
-    this.group3 = makeGroup(d, l3, [this.lookView, this.foamView]);
+    this.group3 = makeGroup(d, l3, [this.lookView, this.foamView, b.who]);
     this.pipes = {};
     for (const [name, code] of Object.entries(PASSES)) {
       const module = await shaderModule(d, HEADER + code, 'liquid ' + name);
-      const layouts = name.startsWith('pressure') ? [l0, l1, l2] : name === 'look' ? [l0, l1, l3] : name === 'fieldSmooth' ? [l0, l1, lS] : name === 'fieldRound' ? [l0, l1, lR] : name.startsWith('field') ? [l0, l1, lF] : [l0, l1];
+      const layouts = name.startsWith('pressure') ? [l0, l1, l2] : name === 'look' ? [l0, l1, l3] : name.startsWith('who') ? [l0, l1, lW] : name === 'fieldSmooth' ? [l0, l1, lS] : name === 'fieldRound' ? [l0, l1, lR] : name.startsWith('field') ? [l0, l1, lF] : [l0, l1];
       this.pipes[name] = computePipeline(d, module, layouts, 'main', 'liquid ' + name);
     }
     this.carry = await carryPipe(d);
@@ -866,6 +916,14 @@ export class Flip {
     if (!f) return;
     f.params.destroy(); f.buf.destroy(); f.raw.destroy(); f.once.destroy(); f.smooth.forEach(t => t.destroy());
     this.field = null;
+  }
+
+  buildWho(pass) {
+    pass.setBindGroup(0, this.group0);
+    pass.setBindGroup(1, this.group1);
+    pass.setBindGroup(2, this.whoGroup);
+    pass.setPipeline(this.pipes.whoClear); pass.dispatchWorkgroups(Math.ceil(this.cells / 256));
+    if (this.live > 0) { pass.setPipeline(this.pipes.whoFill); pass.dispatchWorkgroups(Math.ceil(this.live / 256)); }
   }
 
   buildField(pass) {

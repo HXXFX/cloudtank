@@ -8,17 +8,22 @@ import { MAT_FLOATS, DECAL_FLOATS, MAX_DECALS, packLook, lookNeedsTex, hasMap, a
 import { bitmapForCard, imageSize, subdivide, MAX_IMAGE_LAYERS } from './images.js';
 import { defaultLook, LIGHT_PRESETS, BACKGROUNDS, LEGACY, FINISHES, copy } from './environment.js';
 import { defaults, hexToRgb, lightOf } from './settings.js';
-import { MAX_OBJECTS, MAX_EMITTERS, ATLAS_RES, ATLAS_SLOTS, ATLAS_PAD, OBJ_FLOATS } from './sdf.wgsl.js';
+import { MAX_OBJECTS, MAX_EMITTERS, ATLAS_RES, ATLAS_SLOTS, ATLAS_PAD, OBJ_FLOATS, FLUID_ROWS, FLUID_FLOATS } from './sdf.wgsl.js';
 import { toUnitSpace, interleave } from './importers.js';
 import { Physics, eulerOf, blocksFluid, setGravity } from './physics.js';
 import { Gizmo, project } from './gizmo.js';
 import { ASSET_BY_ID, assetModel, assetModelId } from './assets.js';
 import { drawMarks, pickMark, MARK_TYPES, motionOn } from './marks.js';
 import { drawBox, drawLanding, drawReach, hitBoxHandle, beginBoxDrag, moveBoxDrag } from './boxhandles.js';
-import { postIsNone } from './post.wgsl.js';
+import { postIsNone, effectivePost, wantsBloom } from './post.wgsl.js';
+import { mediaIsNone, effectiveMedia } from './media.wgsl.js';
+import { FluidTable, thicknessOf } from './fluids.js';
+import { FluidForms } from './fluidforms.js';
 import { add, sub, scale, normalize, fromAngles, clamp, toHalf, eulerAxes, length, toLocal } from './math.js';
 import { decalPlace } from './material.js';
 import { SHAPES } from './shapes.js';
+import { SoftWorld, softOn } from './softbody.js';
+import { SoftField } from './softfield.js';
 
 const HANDLE_TOOLS = new Set(['move', 'turn', 'size']);
 const BAKED = new Map();
@@ -76,6 +81,7 @@ export class Viewport {
     this.stats = { fps: 0, simMs: 0, drawMs: 0, frames: 0 };
     this.handlers = {};
     this.emitterData = new Float32Array(MAX_EMITTERS * 16);
+    this.fluids = new FluidTable();
     this.objectData = new Float32Array(MAX_OBJECTS * OBJ_FLOATS);
     this.drawData = new Float32Array(MAX_DRAW * OBJ_FLOATS);
     this.matData = new Float32Array((MAX_DRAW + 1) * MAT_FLOATS);
@@ -84,6 +90,8 @@ export class Viewport {
     this.placing = null;
     this.windNow = [0, 0, 0];
     this.physics = new Physics();
+    this.soft = new SoftWorld();
+    this.softField = new SoftField();
     this.overlay = config.overlay || null;
     this.gizmo = new Gizmo();
     this.tool = 'move';
@@ -100,6 +108,7 @@ export class Viewport {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST, label: 'model shapes' });
     this.shared = {
       emitters: makeBuffer(d, MAX_EMITTERS * 64, UNIFORM(), 'sources'),
+      fluids: makeBuffer(d, FLUID_ROWS * FLUID_FLOATS * 4, UNIFORM(), 'each fluid\'s numbers'),
       objects: makeBuffer(d, MAX_OBJECTS * OBJ_FLOATS * 4, UNIFORM(), 'objects'),
       atlas,
       atlasView: atlas.createView(),
@@ -110,6 +119,8 @@ export class Viewport {
     await this.buildSolvers();
     this.renderer = new Renderer(this.gpu, this.canvas);
     await this.renderer.init();
+    this.renderer.fluidBuf = this.shared.fluids;
+    this.forms = new FluidForms(this.gpu, this.renderer);
     if (this.gpu.timestamps) {
       this.querySet = d.createQuerySet({ type: 'timestamp', count: 4 });
       this.qResolve = d.createBuffer({ size: 32, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
@@ -242,12 +253,13 @@ export class Viewport {
     this.emit('change');
   }
 
-  putBack() { this.physics.putBack(this.scene); }
+  putBack() { this.physics.putBack(this.scene); this.soft.restart(); }
 
   resetFluids() {
     if (this.smoke) this.smoke.reset();
     if (this.flip) this.flip.reset();
     if (this.config.refill) this.config.refill(this);
+    this.fluids.forgetGone(this.scene.emitters);
     this.fluidRun = (this.fluidRun || 0) + 1;
     if (this.physics) this.physics.setWater(null);
     this.simTime = 0;
@@ -283,6 +295,7 @@ export class Viewport {
   setPost(p) { this.look.post = p ? copy(p) : null; }
 
   select(item) {
+    if (!item || !softOn(item)) this.pinTool = false;
     this.scene.selected = item;
     this.scene.picks = item ? [item] : [];
     this.emit('select', item);
@@ -478,9 +491,19 @@ export class Viewport {
     }
   }
 
+  togglePinAt(o, b, local) {
+    const s = o.soft, near = (b.meanEdge * 2) ** 2, list = [...(s.pinAt || [])];
+    const at = local.map((v, k) => v / o.size[k]);
+    const dist2 = q => (q[0] * o.size[0] - local[0]) ** 2 + (q[1] * o.size[1] - local[1]) ** 2 + (q[2] * o.size[2] - local[2]) ** 2;
+    const kept = list.filter(q => dist2(q) > near);
+    if (kept.length === list.length) kept.push(at);
+    s.pinAt = kept.length ? kept : null;
+    s.preset = s.preset || 'custom';
+  }
+
   applyMotion(t) {
     for (const o of this.scene.objects) {
-      if (o.held || !o.motion || !o.home) continue;
+      if (o.held || !o.motion || !o.home || softOn(o)) continue;
       const m = motionAt(o, t);
       if (!m) continue;
       o.pos = add(o.home.pos, m.off);
@@ -537,6 +560,8 @@ export class Viewport {
   }
 
   clearModels() {
+    this.soft.clear();
+    this.releaseSoft();
     this.clearImages();
     this.decalEdit = null;
     for (const id of this.scene.models.keys()) this.dropDisplaced('model:' + id);
@@ -580,6 +605,7 @@ export class Viewport {
     const used = new Set(keep);
     imagesOf(this.look.ground, used);
     for (const o of this.scene.objects) { imagesOf(o, used); for (const p of o.partLooks || []) imagesOf(p, used); }
+    for (const e of this.scene.emitters) if (e.look && e.look.picture) used.add(e.look.picture);
     for (const [id, m] of this.scene.images) {
       if (used.has(id)) continue;
       for (const l of Object.values(m.layers)) if (l >= 0) this.renderer.freeImage(l);
@@ -645,15 +671,30 @@ export class Viewport {
     const wind = this.windAt(this.simTime);
     this.windNow = wind;
     this.giveOnEntry();
-    if (running) this.physics.step(this.scene, frameDt, Math.max(2, Math.ceil(S.speed * 2)), look.wind.on ? wind : null);
+    this.scene.softWorld = this.soft;
+    this.soft.gravity = S.gravity ?? 9.81;
+    this.soft.sync(this.scene, running);
+    const rigidSteps = Math.max(2, Math.ceil(S.speed * 2)), windNow = look.wind.on ? wind : null;
+    if (running && this.soft.any) {
+      this.physics.sync(this.scene);
+      const n = this.soft.begin(this.scene, frameDt, rigidSteps, windNow, this.physics, { turbulence: look.wind.turbulence || 0, time: this.simTime });
+      if (this.soft.awake.length) this.physics.step(this.scene, frameDt, n, windNow, h => this.soft.substep(h));
+      else this.physics.step(this.scene, frameDt, rigidSteps, windNow);
+      this.soft.end();
+    } else if (running) this.physics.step(this.scene, frameDt, rigidSteps, windNow);
+    this.prepareSoft();
     this.followObjects();
     if (this.flip) {
       if (running) this.flip.planEmission(this.scene.emitters.filter(e => this.isOn(e)), frameDt, S.flow);
       else this.flip.newCount = 0;
     }
+    const fluidPlan = this.fluids.pack(S, this.scene.emitters);
+    this.fluidPlan = fluidPlan;
     this.packEmitters();
     const d = this.gpu.device;
+    this.forms.prepare(fluidPlan, this);
     d.queue.writeBuffer(this.shared.emitters, 0, this.emitterData);
+    d.queue.writeBuffer(this.shared.fluids, 0, this.fluids.data);
     d.queue.writeBuffer(this.shared.objects, 0, this.packSolidObjects());
 
     const stir = this.takeStir(realDt);
@@ -681,14 +722,19 @@ export class Viewport {
     if (this.smoke && running) this.smoke.step(cp);
     if (this.flip && running) this.flip.step(cp, substeps);
     const smooth = this.flip && S.look === 'smooth' && this.flip.live > 0 && this.display.liquid;
+    if (this.flip && fluidPlan.waterOwn) this.flip.buildWho(cp);
     if (smooth) this.flip.buildField(cp);
+    this.forms.runBlocks(cp, fluidPlan, this);
     const lights = this.lightsForFrame();
     if (this.smoke && this.display.smoke && lights.length) this.smoke.lightLocal(cp, lights.map(l => l.pos));
     cp.end();
     if (this.flip && running) this.flip.endFrame(enc);
 
     const meshes = this.packDraws();
-    this.renderer.post = postIsNone(look.post) ? null : look.post;
+    const post = effectivePost(look.post);
+    this.renderer.post = postIsNone(post) ? null : post;
+    const media = effectiveMedia(look.media);
+    this.renderer.media = mediaIsNone(media) ? null : media;
     const G = look.ground;
     const world = JSON.stringify([look.light, look.background, G.color, lights.map(l => [l.pos, l.col])]);
     this.envAge = (this.envAge || 0) + 1;
@@ -697,7 +743,7 @@ export class Viewport {
     const lookCode = !drawWater ? 0 : S.look === 'dots' ? 1 : S.look === 'smooth' ? 3 : 2;
     const radius = this.flip ? (lookCode === 1 ? this.flip.cell * 0.32 : lookCode === 3 ? this.flip.cell * 0.7 : this.flip.cell * 0.5) : 0;
     this.renderer.packFrame({
-      camera: this.camera, look, time: this.time, wind,
+      camera: this.camera, look, time: this.time, wind, smokeLook: fluidPlan.smokeLook, waterOwn: fluidPlan.waterOwn,
       smoke: this.display.smoke ? this.smoke : null, smokeAbsorb: S.smokeOpacity,
       liquidView: { look: lookCode, radius, clarity: S.clarity, color: hexToRgb(S.liquidColor),
         min: this.flip ? this.flip.min : [0, 0, 0], max: this.flip ? this.flip.max : [0, 0, 0], cell: this.flip ? this.flip.cell : 1,
@@ -708,14 +754,17 @@ export class Viewport {
       box: this.flip && this.display.box && !this.clean ? { min: this.flip.min, max: this.flip.max } : null,
       shadowReach: Math.max(7, Math.hypot(this.region.size[0], this.region.size[2]) * 0.6),
       shadowCenter: [this.region.center[0], 1, this.region.center[1]],
-      lights, glass: this.glassDraws.length > 0,
+      lights, glass: this.glassDraws.length > 0, snap: media && media.snap > 0 && media.res > 0 ? media.res : 0,
     });
+    const pics = this.picJobs && this.picJobs.length ? this.picJobs.slice(0, 3) : null;
     this.renderer.render(enc, {
+      keepScene: !!pics, keepLight: !!pics && pics.some(j => j.post && !postIsNone(j.post) && wantsBloom(j.post)),
       drawData: this.drawData, meshes, objectCount: this.shadowCount, picked: this.clean ? [] : this.pickedDraws,
       glass: this.glassDraws, matData: this.matData, decalData: this.decalData, decals: this.decalCount, groundTex: this.groundTex,
       particles: this.flip && this.display.liquid ? { pos: this.flip.buf.pos, col: this.flip.buf.col, count: this.flip.live, look: this.flip.lookView, foam: this.flip.foamView,
-        field: smooth ? this.flip.field.view : null } : null,
-      smoke: this.smoke, look: lookCode, timestamps: this.querySet,
+        field: smooth ? this.flip.field.view : null, who: this.flip.buf.who } : null,
+      smoke: this.smoke, look: lookCode, timestamps: this.querySet, fluidData: this.fluids.data,
+      blocks: this.forms.blocksToDraw(fluidPlan), cellsPass: this.forms.cellsPassFor(fluidPlan, this),
     });
 
     let copied = false;
@@ -725,6 +774,7 @@ export class Viewport {
     }
     const probe = this.probe && !this.probeBusy ? this.encodeProbe(enc) : null;
     d.queue.submit([enc.finish()]);
+    if (this.picJobs && this.picJobs.length) this.runPictures();
     this.drawOverlay();
     if (copied) this.readTimes();
     if (probe) this.readProbe(probe);
@@ -746,6 +796,20 @@ export class Viewport {
   }
 
   sampleScreen(rects) { return new Promise(resolve => { this.probe = { rects, resolve }; }); }
+
+  filterPictures(jobs, w, h) {
+    if (this.picAsk) this.picAsk.resolve(this.picAsk.out);
+    return new Promise(resolve => {
+      this.picAsk = { resolve, out: jobs.map(() => null), w, h, waits: [] };
+      this.picJobs = jobs.map((j, i) => ({ ...j, i, ask: this.picAsk }));
+    });
+  }
+  runPictures() {
+    const batch = this.picJobs.splice(0, 3), A = batch[0].ask;
+    const made = this.renderer.filterPictures(batch.map(j => ({ post: postIsNone(j.post) ? null : j.post, media: mediaIsNone(j.media) ? null : j.media })), A.w, A.h);
+    batch.forEach((j, k) => { const p = made[k]; A.waits.push(p ? p.then(img => { A.out[j.i] = img; }, () => {}) : Promise.resolve()); });
+    if (A.waits.length === A.out.length) Promise.all(A.waits).then(() => { if (this.picAsk === A) this.picAsk = null; A.resolve(A.out); });
+  }
 
   encodeProbe(enc) {
     const tex = this.renderer.screenTexture, d = this.gpu.device;
@@ -828,9 +892,10 @@ export class Viewport {
       }
       const c = lightOf(e.color);
       if (e.type === 'smoke') {
-        out.set([...e.pos, e.radius, ...c, 7 * e.rate * S.smokeAmount, ...vel, 4 * (e.heat ?? 1), kind, 0, 0, 0], i * 16);
+        const shadow = e.look && e.look.shadow !== undefined ? Math.max(e.look.shadow, 0.02) : 1;
+        out.set([...e.pos, e.radius, ...c, 7 * e.rate * S.smokeAmount * thicknessOf(e, S) * shadow, ...vel, 4 * (e.heat ?? 1), kind, 0, 0, e.row || 0], i * 16);
       } else {
-        out.set([...e.pos, e.radius, ...c, 0, ...vel, 0, kind, e.newFirst || 0, e.newCount || 0, 0], i * 16);
+        out.set([...e.pos, e.radius, ...c, 0, ...vel, 0, kind, e.newFirst || 0, e.newCount || 0, e.row || 0], i * 16);
       }
     });
   }
@@ -843,6 +908,11 @@ export class Viewport {
     for (const o of S.objects) {
       if (o.model && !(S.models.get(o.model) || {}).ready) continue;
       if (!blocksFluid(o)) continue;
+      const sb = softOn(o) ? this.soft.bodies.get(o.id) : null;
+      if (softOn(o)) {
+        if (sb && sb.fieldNow) { packObject(out, n, sb.fieldNow.record, 0, sb.fieldNow.models); out[n * OBJ_FLOATS + 31] = -1; n++; this.solidIds.push(o.id); }
+        continue;
+      }
       packObject(out, n++, o, kits.has(o.id) || (ASSET_BY_ID[o.asset] || {}).porous ? 1 : 0, S.models);
       this.solidIds.push(o.id);
     }
@@ -885,6 +955,13 @@ export class Viewport {
     for (const o of S.objects) {
       if (o.hidden) continue;
       const m = o.model ? S.models.get(o.model) : null;
+      const sb = softOn(o) ? this.soft.bodies.get(o.id) : null;
+      if (sb) {
+        const parts = sb.drawn.parts;
+        if (parts && o.partLooks) parts.forEach((p, k) => looks.push({ o, look: o.partLooks[k] || o, first: p.first, count: p.count, m, part: k, sb }));
+        else looks.push({ o, look: o, first: 0, count: -1, m, part: -1, sb });
+        continue;
+      }
       if (m && m.parts && o.partLooks) m.parts.forEach((p, k) => looks.push({ o, look: o.partLooks[k] || o, first: p.first, count: p.count, m, part: k }));
       else looks.push({ o, look: o, first: 0, count: -1, m, part: -1 });
     }
@@ -898,11 +975,19 @@ export class Viewport {
       if (chosen) this.pickedDraws.push(i);
       const glass = isGlassLook(look);
       if (glass) this.glassDraws.push(i);
-      packObject(out, i, o, S.isPicked(o) ? 1 : 0, S.models, look);
+      packObject(out, i, l.sb ? { ...l.sb.drawRecord, shape: o.shape, model: o.model, vel: o.vel, spin: [0, 0, 0] } : o, S.isPicked(o) ? 1 : 0, S.models, look);
       this.decalCount += packLook(mats, i, look, { layer, half: o.size, outline: chosen ? outlineNumber(o) : 0, decalData: this.decalData, decalAt: this.decalCount });
-      const base = m ? 'model:' + o.model : (o.shape === 'wall' || o.shape === 'slab' ? 'box' : o.shape);
+      const base = m ? 'model:' + o.model : (o.shape === 'wall' || o.shape === 'slab' || o.shape === 'plane' ? 'box' : o.shape);
       const pics = lookNeedsTex(look);
       const dr = { mesh: base, first: l.first, count: l.count, kind: 0 };
+      if (l.sb) {
+        dr.mesh = 'soft:' + o.id;
+        if (pics) dr.kind = 4;
+        if (glass) { dr.glassKind = 0; if (!(look.decals && look.decals.length)) dr.skip = true; else dr.kind = 4; }
+        meshes.push(dr);
+        i++;
+        continue;
+      }
       if (pics) {
         dr.kind = m && m.uvs && texValue(look, 'map') === 'uv' ? 2 : 1;
         if (hasMap(look, 'disp') && !glass) {
@@ -945,6 +1030,56 @@ export class Viewport {
         (point ? 6 : 4) + chosen, S.models);
     }
     return meshes;
+  }
+
+
+  prepareSoft() {
+    const R = this.renderer;
+    for (const b of this.softGone()) {
+      R.removeMesh('soft:' + b.o.id);
+      if (b.fieldSlot !== undefined && !this.soft.bodies.has(b.o.id)) { this.freeSlots.push(b.fieldSlot); b.fieldSlot = undefined; }
+    }
+    const fluidsHere = this.scene.emitters.length > 0 || (this.flip && this.flip.live > 0) || (this.smoke && this.scene.emitters.some(e => e.type === 'smoke'));
+    for (const b of this.soft.bodies.values()) {
+      if (b.failed) continue;
+      const name = 'soft:' + b.o.id;
+      if (!R.meshes.has(name) || b.meshFor !== b) {
+        const D = b.drawn, rest = new Float32Array(D.corners * 8);
+        for (let c = 0; c < D.corners; c++) {
+          rest.set([D.lp[c * 3], D.lp[c * 3 + 1], D.lp[c * 3 + 2], D.ln[c * 3], D.ln[c * 3 + 1], D.ln[c * 3 + 2], D.uv ? D.uv[c * 2] : 0, D.uv ? D.uv[c * 2 + 1] : 0], c * 8);
+        }
+        R.addSoftMesh(name, D.corners, rest);
+        b.meshFor = b;
+        b.drawDirty = true;
+      }
+      if (b.drawDirty) { b.updateDraw(); R.writeSoftMesh(name, b.drawData); }
+      const o = b.o;
+      if (!blocksFluid(o) || !fluidsHere) { b.fieldNow = null; continue; }
+      if (b.fieldNow && b.asleep && b.fieldAt === b.drawStamp) continue;
+      if (b.fieldSlot === undefined) {
+        if (!this.freeSlots.length) { if (!b.saidFull) { b.saidFull = true; this.emit('notice', `${o.name} is soft, but a scene's ${ATLAS_SLOTS} places for shapes are all in use, so the fluids pass through it.`); } continue; }
+        b.fieldSlot = this.freeSlots.shift();
+      }
+      const cell = Math.max(this.flip ? this.flip.cell : 0.06, this.smoke ? this.smoke.cell || 0 : 0);
+      const F = this.softField.build(b, Math.max(b.P.thick, cell * 0.75));
+      this.gpu.device.queue.writeTexture({ texture: this.shared.atlas, origin: [0, 0, b.fieldSlot * ATLAS_RES] }, this.softField.half, { bytesPerRow: ATLAS_RES * 2, rowsPerImage: ATLAS_RES }, [ATLAS_RES, ATLAS_RES, ATLAS_RES]);
+      const entry = { slot: b.fieldSlot, prop: F.prop };
+      b.fieldNow = { record: { pos: F.pos, size: F.size, rot: [0, 0, 0], shape: 'model', model: 'x', vel: F.vel, spin: F.spin, color: o.color }, models: { get: () => entry } };
+      b.fieldAt = b.drawStamp;
+    }
+  }
+
+  softGone() {
+    const seen = this.softSeen || (this.softSeen = new Map()), out = [];
+    for (const [id, b] of seen) if (this.soft.bodies.get(id) !== b) { out.push(b); seen.delete(id); }
+    for (const [id, b] of this.soft.bodies) if (!seen.has(id)) seen.set(id, b);
+    return out;
+  }
+
+  releaseSoft() {
+    if (!this.renderer) return;
+    for (const b of (this.softSeen || new Map()).values()) { this.renderer.removeMesh('soft:' + b.o.id); b.fieldSlot = undefined; }
+    this.softSeen = new Map();
   }
 
 
@@ -1141,6 +1276,11 @@ export class Viewport {
         return;
       }
     }
+    if (this.pinTool && e.button === 0 && !e.shiftKey) {
+      const ray = this.camera.ray(m.x, m.y), hit = this.scene.pick(ray, { emitters: false }), b = hit && hit.item && softOn(hit.item) ? this.soft.bodies.get(hit.item.id) : null;
+      const h = b ? b.rayHit(ray.origin, ray.dir) : null;
+      if (h) { this.select(hit.item); this.togglePinAt(hit.item, b, h.local); this.emit('commit'); this.drag = null; return; }
+    }
     const tgt = this.gizmoTarget();
     if (tgt && e.button === 0) {
       const h = this.gizmo.hit(tgt, this.camera, m.w, m.h, m.cx, m.cy);
@@ -1181,6 +1321,20 @@ export class Viewport {
         this.drag = { mode: 'move', item: it, grabY: y, offset: sub(it.pos, p), last: m, moved: false, group: [it], starts: this.startsOf([it]) };
       } else this.drag = { mode: 'orbit', last: m };
       return;
+    }
+    if (hit && hit.item && !e.shiftKey && softOn(hit.item) && this.soft.bodies.get(hit.item.id)) {
+      const b = this.soft.bodies.get(hit.item.id);
+      if (this.pinTool) {
+        const h = b.rayHit(ray.origin, ray.dir);
+        if (h) { this.select(hit.item); this.togglePinAt(hit.item, b, h.local); this.emit('commit'); }
+        this.drag = null;
+        return;
+      }
+      if (this.playing) {
+        if (this.scene.selected !== hit.item || this.movers().length > 1) this.select(hit.item);
+        this.drag = { mode: 'softgrab', item: hit.item, grab: this.soft.grab(b, hit.point), depth: hit.t, last: m, moved: false };
+        return;
+      }
     }
     if (hit && hit.item) {
       const item = this.kitOf(hit.item) || hit.item;
@@ -1232,6 +1386,11 @@ export class Viewport {
       }
       dr.moved = true;
       this.emit('moving', E.owner);
+      return;
+    }
+    if (dr.mode === 'softgrab') {
+      const ray = this.camera.ray(m.x, m.y);
+      dr.grab.at = add(ray.origin, scale(ray.dir, dr.depth));
       return;
     }
     if (dr.mode === 'gizmo') {
@@ -1298,6 +1457,7 @@ export class Viewport {
       if (item && !(this.movers().length > 1 && this.selectedItems().concat(this.movers()).includes(item))) this.select(item);
       this.emit('context', { item, x: e.clientX, y: e.clientY });
     }
+    if (dr && dr.mode === 'softgrab') this.soft.letGo(dr.grab);
     if (dr && dr.mode === 'gizmo') {
       this.gizmo.end(); this.letGo(dr.item);
       if (dr.item.kind === 'group') for (const s of dr.starts) this.letGo(s.m);

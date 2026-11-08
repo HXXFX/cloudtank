@@ -1,4 +1,6 @@
-import { el, slider, numbers, color, choice, toggle, dial, section, button, repaintAll, pick, swatches, mapSlot, MIXED } from './dom.js';
+import { el, slider, numbers, color, choice, toggle, dial, section, button, repaintAll, pick, swatches, mapSlot, text, MIXED } from './dom.js';
+import { SETTINGS as SCENE_SETTINGS } from '../engine/settings.js';
+import { OWN_SETTINGS, LOOK_PRESETS, LOOK_DEFAULTS, lookValue, lookFromPreset, isSolidForm, isCellForm } from '../engine/fluids.js';
 import { FINISH_LOOK, finishOf, isGlassLook, pbrValue, setPbr, MAP_SLOTS, MAPPINGS, hasMap, anyMap, texValue, decalValue, DECAL_DEFAULTS, fitTile } from '../engine/material.js';
 import { imageThumb } from '../engine/images.js';
 import { setMap, removeMap, addDecal, pickImageFile } from './imagedrop.js';
@@ -10,6 +12,8 @@ import { hexToRgb, rgbToHex } from '../engine/settings.js';
 import { fromAngles } from '../engine/math.js';
 import { ASSET_BY_ID, OBJECT_FINISHES, SWATCHES } from '../engine/assets.js';
 import { motionOn } from '../engine/marks.js';
+import { softOn } from '../engine/softbody.js';
+import { SOFT_KINDS, SOFT_PRESETS, SOFT_DEFAULTS, softValue, softFromPreset, setSoft, isSheet, isSolid, isBalloon } from '../engine/softpresets.js';
 
 const DEG = 180 / Math.PI;
 const fmtN = n => Math.round(n).toLocaleString('en-US');
@@ -51,10 +55,10 @@ function keepFoot(o, vp, change) {
 
 
 const CATS = {
-  extractor: 'Extractor', drain: 'Drain', smoke: 'Smoke source', liquid: 'Liquid source', aim: 'Direction', timer: 'Timer',
+  extractor: 'Extractor', drain: 'Drain', smoke: 'Smoke source', liquid: 'Liquid source', fluidlook: 'Look of this fluid', fluidown: 'This fluid', aim: 'Direction', timer: 'Timer', soft: 'Soft body',
   light: 'Light', transform: 'Transform', material: 'Material', texture: 'Texture', decals: 'Decals', physics: 'Physics', collision: 'Collision', motion: 'Motion', draw: 'Rendering',
 };
-const CAT_ORDER = ['extractor', 'drain', 'smoke', 'liquid', 'light', 'aim', 'timer', 'transform', 'material', 'texture', 'decals', 'physics', 'collision', 'motion', 'draw'];
+const CAT_ORDER = ['extractor', 'drain', 'smoke', 'liquid', 'fluidlook', 'fluidown', 'light', 'aim', 'timer', 'soft', 'transform', 'material', 'texture', 'decals', 'physics', 'collision', 'motion', 'draw'];
 
 const on = { kind: 'toggle', label: 'On', get: t => t.on !== false, set: (t, v) => { t.on = v; }, def: () => true, also: 'Auto Activate, Enabled' };
 const M = t => (t.motion ||= { travel: 'none', dir: 90, speed: 0.3, distance: 4, spin: 0, bob: 0 });
@@ -67,6 +71,20 @@ const motionChanged = (t, ctx) => {
   ctx.repaint();
 };
 const PULSE = t => (t.pulse ||= { on: 3, off: 3, delay: 0 });
+
+const fluidSources = (it, vp) => sourcesOf(it, vp).filter(e => !e.sink);
+const ownOf = (type, key) => { const d = SCENE_SETTINGS.find(s => s.key === key); return { cat: 'fluidown', kind: 'slider', label: d.label, min: d.min, max: d.max, step: d.step, help: `${d.help} The arrow goes back to what the whole scene has (the Fluids tab).`, also: d.also ? d.also.replace('Unreal: ', '').split(' · ')[0] : undefined,
+  on: (it, vp) => fluidSources(it, vp).filter(e => e.type === type), get: (t, c) => (t.own && t.own[key] !== undefined ? t.own[key] : c.vp.settings[key] ?? d.value),
+  set: (t, v) => { (t.own ||= {})[key] = v; }, isDef: t => !t.own || t.own[key] === undefined, toDef: t => { if (t.own) { delete t.own[key]; if (!Object.keys(t.own).length) delete t.own; } } }; };
+const LV = (t, k) => lookValue(t.look, k);
+const setLook = (t, k, v) => { (t.look ||= {})[k] = v; t.look.preset = 'custom'; };
+const lookRow = (label, key, extra = {}) => ({ cat: 'fluidlook', label, on: fluidSources, get: t => LV(t, key), set: (t, v) => setLook(t, key, v), def: () => LOOK_DEFAULTS[key], ...extra });
+const solidLook = t => isSolidForm(LV(t, 'form'));
+const cellLook = t => isCellForm(LV(t, 'form'));
+const textLook = t => LV(t, 'form') === 'text';
+const isSmoke = t => t.type === 'smoke';
+const shadeIs = (...s) => t => s.includes(LV(t, 'shade'));
+const picturedLook = t => !!LV(t, 'picture');
 const timed = t => !!(t.pulse && t.pulse.on > 0 && t.pulse.off > 0);
 
 const looksOf = (it, vp) => {
@@ -113,7 +131,52 @@ const decalOf = t => (t.decals && t.decals[t.decalPick ?? -1]) || null;
 const decalsPicked = (it, vp) => looksOf(it, vp).map(decalOf).filter(Boolean);
 const decalRow = (label, key, extra) => ({ cat: 'decals', label, on: decalsPicked, get: d => decalValue(d, key), set: (d, v) => { d[key] = v; }, def: () => DECAL_DEFAULTS[key], ...extra });
 
+const rigid = self(t => isObject(t) && !softOn(t));
+const softable = (it, vp) => (isObject(it) && !vp.scene.emitters.some(e => e.attach && e.attach.to === it.id) ? [it] : []);
+const softs = (it, vp) => softable(it, vp).filter(softOn);
+const SV = (t, k) => softValue(t.soft, k);
+const SD = (t, k) => { const P = SOFT_PRESETS[t.soft.base]; return P && P[k] !== undefined ? P[k] : SOFT_DEFAULTS[k]; };
+const softRow = (label, key, extra = {}) => { const k = extra.k || 1; return { cat: 'soft', label, on: softs, get: t => SV(t, key) * k, set: (t, v) => { t.soft[key] = v / k; t.soft.preset = 'custom'; }, def: t => SD(t, key) * k, ...extra }; };
+const sheetOf = t => isSheet(t.soft), solidOf = t => isSolid(t.soft), airOf = t => isBalloon(t.soft);
+const SOFT_FIRST = { cloth: 'cotton', solid: 'jelly', balloon: 'party' };
+
+const SOFT_ROWS = [
+  { cat: 'soft', kind: 'toggle', label: 'Soft body', on: softable, get: softOn, set: (t, v, c) => { setSoft(t, v); c.rebuild(); }, known: 'Unreal: Chaos Cloth, Chaos Flesh · Houdini: Vellum · Blender: Cloth, Soft Body · Unity: Cloth', also: 'Cloth, Softbody, Soft body, Chaos, Vellum, Flesh, Jelly', help: 'On: it bends, folds, squashes and falls as what it is made of would. Its look and everything else stay. Off: it is solid again, where it started.' },
+  { cat: 'soft', kind: 'choice', label: 'Acts as', wrap: true, on: softs, options: Object.entries(SOFT_KINDS), get: t => SV(t, 'kind'), set: (t, v, c) => { t.soft = { ...softFromPreset(SOFT_FIRST[v], t.soft), on: true }; c.repaint(); c.rebuild(); }, also: 'Cloth, Tetrahedral, Struts, Pressure, Balloon',
+    titles: { cloth: 'Only its surface, with no air: a sheet, a blanket, a bag', solid: 'Filled right through, as jelly, foam or rubber is', balloon: 'Its surface, holding the air inside it' } },
+  { cat: 'soft', kind: 'pick', label: 'Ready-made', on: softs, options: ts => Object.entries(SOFT_PRESETS).filter(([, P]) => P.kind === SV(ts[0], 'kind')).map(([k, P]) => [k, P.label]).concat([['custom', 'As set below']]), get: t => SV(t, 'preset'), set: (t, v, c) => { if (v === 'custom') return; t.soft = { ...softFromPreset(v, t.soft), on: true }; c.repaint(); c.rebuild(); }, also: 'Preset, Material, Silk, Cotton, Denim, Leather, Rubber, Jelly, Foam, Silicone, Balloon', help: 'A starting point in the range published for that kind of thing, not a measurement of a particular one. Everything below is yours to change.' },
+  softRow('Weight', 'sheet', { kind: 'slider', log: true, min: 0.01, max: 10, step: 1, unit: ' kg/m²', when: sheetOf, known: 'Unreal: Density · Houdini: Mass, Density · Blender: Vertex Mass · Unity: mass', also: 'Mass, Density, Vertex Mass', help: 'What a square metre weighs. Silk 0.06, a bed sheet 0.2, denim 0.45, a wool blanket 0.6.' }),
+  softRow('Stretch', 'stretch', { kind: 'slider', log: true, min: 1, max: 1000000, step: 1, unit: ' N/m', when: sheetOf, known: 'Unreal: Edge Stiffness · Houdini: Stretch Stiffness · Blender: Tension · Unity: Stretching Stiffness', also: 'Edge Stiffness, Stretch Stiffness, Tension, Stretching Stiffness', help: 'How hard it is to pull it longer. At 1,000 N/m, a strip a metre wide stretches 1 % under 10 newtons. Real fabrics are far stiffer than the solver can hold at few steps, and then read as hardly stretching at all: raise Steps for the difference.' }),
+  softRow('Squeeze', 'compress', { kind: 'slider', log: true, min: 0.1, max: 1000000, step: 1, unit: ' N/m', when: sheetOf, known: 'Blender: Compression · Houdini: Compression Stiffness', also: 'Compression, Compression Stiffness', help: 'How hard it is to push it shorter. Real cloth buckles rather than shortens: far less than Stretch, and it wrinkles more easily.' }),
+  softRow('Shear', 'shear', { kind: 'slider', log: true, min: 0.1, max: 1000000, step: 1, unit: ' N/m', when: sheetOf, known: 'Blender: Shear · Houdini: Shear Stiffness · Unreal: Area Stiffness', also: 'Shear, Shear Stiffness, Area Stiffness, Bias', help: 'How hard it is to pull it across its threads, on the slant.' }),
+  softRow('Bend', 'bend', { kind: 'slider', log: true, k: 1e6, min: 0.01, max: 100000, step: 1, unit: ' µN·m', when: sheetOf, known: 'Unreal: Bending Stiffness · Houdini: Bend Stiffness · Blender: Bending · Unity: Bending Stiffness', also: 'Bending Stiffness, Bend Stiffness, Bending, Wrinkle', help: 'How stiffly it folds: higher, wider folds. Silk 0.5, cotton 10, denim 120, leather 1,000. Very stiff sheets need more Steps to stand up to it.' }),
+  softRow('Density', 'density', { kind: 'slider', log: true, min: 10, max: 10000, step: 1, unit: ' kg/m³', when: solidOf, known: 'Unreal: Density · Houdini: Density · Blender: Mass', also: 'Density, Mass', help: 'Foam 60, jelly 1,050, rubber 1,100. Water is 1,000: lighter than that floats.' }),
+  softRow('Hardness', 'young', { kind: 'slider', log: true, k: 0.001, min: 0.1, max: 100000, step: 1, unit: ' kPa', when: solidOf, known: 'Unreal: Young\'s Modulus · Houdini: Shape Stiffness · Blender: Goal Stiffness', also: 'Young, Young\'s Modulus, Stiffness, Shape Stiffness', help: 'Young\'s modulus. 30 kPa a firm jelly, 300 kPa silicone, 2,000 kPa a rubber band. Too soft for its size and it cannot hold itself up, as a real one could not.' }),
+  softRow('Keeps volume', 'poisson', { kind: 'slider', min: 0, max: 0.49, step: 0.01, when: solidOf, known: 'Unreal: Poisson Ratio · Houdini: Volume Stiffness', also: 'Poisson, Poisson Ratio, Volume Stiffness', help: 'Poisson\'s ratio. 0: squeezed, it does not bulge, as a sponge does not. 0.49: it bulges out by as much as it is squeezed, as rubber does.' }),
+  softRow('Air inside', 'air', { kind: 'slider', log: true, min: 0.02, max: 20, step: 1, unit: ' ×', when: airOf, known: 'Unreal: Pressure · Houdini: Pressure, Rest Scale · Blender: Target Volume, Pressure', also: 'Inflate, Inflation, Pressure, Target Volume, Rest Scale, Deflate', help: 'How much air is in it, against what would fill it at rest at the pressure outside. Over 1, it inflates; under 1, it goes down and creases. The skin holds it: a stiff skin takes less volume, at a higher pressure.' }),
+  softRow('Gas', 'gas', { kind: 'choice', options: [['air', 'Air'], ['helium', 'Helium']], when: airOf, also: 'Helium, Buoyancy, Float', titles: { air: 'Weighs what the air it pushes aside weighs: it falls by its skin\'s weight', helium: 'Far lighter than the air it pushes aside: it rises' } }),
+  softRow('Pressure', 'pressure', { kind: 'slider', min: -1000, max: 1000, step: 1, unit: ' Pa', known: 'Unreal: Pressure · Blender: Pressure', also: 'Pressure, Vacuum, Suction, Inflate', help: 'A steady push on its surface, the way it faces; below 0 it is sucked in. On a sheet it is a push from one side; on a closed bag below 0, it is a vacuum bag that presses onto what is inside.' }),
+  softRow('Grow or shrink', 'grow', { kind: 'slider', log: true, min: 0.1, max: 5, step: 1, unit: ' ×', known: 'Unreal: Rest Length Scale · Houdini: Rest Length Scale · Blender: Shrinking Factor', also: 'Shrink, Grow, Shrinking Factor, Rest Length Scale, Shrink wrap, Heat', help: 'Its size at rest, across: 0.5 shrinks to half, as heated film does, tightening on whatever is under it; 2 grows to twice.' }),
+  softRow('Over', 'over', { kind: 'slider', min: 0, max: 30, step: 0.1, unit: ' s', also: 'Time, Speed', help: 'How long it takes to reach a new Grow, or a new Air inside.' }),
+  softRow('Damping', 'damp', { kind: 'slider', min: 0, max: 40, step: 0.1, unit: ' /s', known: 'Unreal: Damping · Houdini: Damping Ratio · Blender: Damping · Unity: Damping', also: 'Damping, Damping Ratio', help: 'How fast shaking within it dies away: at 2, to about a third in half a second. Falling and being carried are not slowed by it.' }),
+  softRow('Air drag', 'drag', { kind: 'slider', min: 0, max: 3, step: 0.01, known: 'Unreal: Drag · Blender: Air Viscosity · Unity: External Acceleration', also: 'Drag, Air Viscosity, Aerodynamics', help: 'How much the air holds it back: 1.2 is a flat plate. A sheet falling flat stops gathering speed at the square root of 2 x weight x g / (1.2 x this).' }),
+  softRow('Air lift', 'lift', { kind: 'slider', min: 0, max: 2, step: 0.01, known: 'Unreal: Lift', also: 'Lift, Aerodynamics', help: 'How much the air pushes it sideways when it meets it on a slant: what makes a sheet glide and a flag flap.' }),
+  softRow('Thickness', 'thick', { kind: 'slider', log: true, min: 0.05, max: 10, step: 1, unit: ' cm', known: 'Unreal: Collision Thickness · Houdini: Thickness · Blender: Collision Distance · Unity: Surface Penetration', also: 'Thickness, Collision Thickness, Collision Distance, Radius', help: 'How far its points stay from other things: its thickness, as far as things touching it are concerned.' }),
+  softRow('Grip', 'grip', { kind: 'slider', min: 0, max: 1.5, step: 0.01, known: 'Unreal: Friction · Houdini: Friction · Blender: Friction · Unity: Friction', also: 'Friction', help: 'How much it slides on what it touches. With two things it is the root of their two grips: a pair of 0.6 slides on a slope steeper than 31 degrees.' }),
+  softRow('Bounce', 'bounce', { kind: 'slider', min: 0, max: 1, step: 0.01, also: 'Restitution', help: 'How much of its speed into a surface it comes back with. It has its own spring too: this adds to that.' }),
+  softRow('Own folds collide', 'self', { kind: 'toggle', when: sheetOf, get: t => SV(t, 'self') !== false, set: (t, v) => { t.soft.self = v; t.soft.preset = 'custom'; }, def: undefined, known: 'Unreal: Self Collision · Houdini: Self Collisions · Blender: Self Collisions · Unity: Self Collision', also: 'Self Collision, Self Collisions', help: 'Its folds do not pass through each other. A sheet that crumples costs more with this on.' }),
+  softRow('Fold gap', 'selfGap', { kind: 'slider', min: 0, max: 10, step: 0.1, unit: ' cm', when: t => sheetOf(t) && SV(t, 'self') !== false, known: 'Unreal: Self Collision Thickness · Unity: Self Collision Distance · Blender: Self Collision Distance', also: 'Self Collision Thickness, Self Collision Distance', help: '0: worked out from its cell, as near as it can be without its folds slipping between each other\'s points.' }),
+  softRow('Pinned', 'pin', { kind: 'choice', wrap: true, options: [['none', 'Free'], ['edge', 'Edge'], ['two', '2 corners'], ['four', '4 corners'], ['middle', 'Middle']], known: 'Unreal: Max Distance · Houdini: Pin to Animation · Blender: Pin Group · Unity: Max Distance', also: 'Pin, Pin Group, Max Distance, Attach, Fix', titles: { none: 'Nothing holds it', edge: 'Its top edge (lying flat: its far edge)', two: 'The two top corners', four: 'All four corners', middle: 'One point at its middle' }, help: 'What holds it where it is. Moving it with its handles moves what is pinned, and the rest follows.' }),
+  { cat: 'soft', kind: 'toggle', label: 'Click on it to pin', on: softs, noCommit: true, get: (t, c) => !!c.vp.pinTool, set: (t, v, c) => { c.vp.pinTool = v; }, also: 'Pin, Paint, Point', help: 'While this is on, a click on it pins that place, or unpins it if it is pinned. Off, dragging it takes hold of it while it runs.' },
+  { cat: 'soft', kind: 'action', label: 'Let go of all pins', on: softs, when: t => SV(t, 'pin') !== 'none' || !!(t.soft.pinAt && t.soft.pinAt.length), run: t => { t.soft.pin = 'none'; t.soft.pinAt = null; } },
+  softRow('Cell size', 'cell', { kind: 'slider', min: 0, max: 30, step: 0.1, unit: ' cm', known: 'Unreal: Resolution · Houdini: Target Edge Length · Blender: Subdivisions', also: 'Resolution, Subdivision, Edge Length, Detail, Target Edge Length', help: 'How far apart its points are. Finer: smaller wrinkles, and more of the processor\'s time. 0: worked out from its size, about 2,500 points.' }),
+  softRow('Steps', 'steps', { kind: 'slider', min: 1, max: 64, step: 1, known: 'Unreal: Sub Steps · Houdini: Substeps · Blender: Quality Steps · Unity: Solver Frequency', also: 'Substeps, Sub Steps, Quality, Solver Frequency, Iterations', help: 'Solver steps a frame. More: stiffer things hold their stiffness and less is lost, and it takes that much more of the processor\'s time.' }),
+  { cat: 'soft', kind: 'softinfo', label: 'What it is now', on: softs, also: 'Points, Stats' },
+  { cat: 'soft', kind: 'action', label: 'Start it again', title: 'Back to where it was put, at rest, with its air as at the start.', on: softs, noCommit: true, run: (t, c) => { const b = c.vp.soft.bodies.get(t.id); if (b) b.restart(); }, also: 'Reset, Restart' },
+];
+
 export const SETTINGS = [
+  ...SOFT_ROWS,
   { cat: 'extractor', ...on, on: sourcesKind('extractor') },
   { cat: 'extractor', kind: 'slider', label: 'Strength', min: 0, max: 4, step: 0.05, on: sourcesKind('extractor'), get: t => t.rate, set: (t, v) => { t.rate = v; },
     def: (t, vp) => sourceDefault(t, 'rate', vp), help: 'How hard it draws the air in. At 1, the air beside a 30 cm one moves in at about 0.3 m/s. Smoke well outside its Reach hardly feels it: raise Reach first.', also: 'Velocity Mult, sink' },
@@ -137,6 +200,40 @@ export const SETTINGS = [
   ]),
   { cat: 'smoke', kind: 'slider', label: 'Heat', min: 0, max: 3, step: 0.05, on: sourcesKind('smoke'), get: t => t.heat ?? 1, set: (t, v) => { t.heat = v; },
     def: (t, vp) => sourceDefault(t, 'heat', vp), help: 'Hot smoke rises faster; 0 is a cold mist that sinks.', also: 'Temperature Mult' },
+
+  { cat: 'fluidlook', kind: 'choice', label: 'Ready-made', noLabel: true, wrap: true, options: Object.entries(LOOK_PRESETS).map(([k, p]) => [k, p.label]), titles: Object.fromEntries(Object.entries(LOOK_PRESETS).map(([k, p]) => [k, p.says])),
+    on: fluidSources, get: t => (t.look ? t.look.preset || 'custom' : 'real'), set: (t, v, c) => { const L = lookFromPreset(v, t.look); if (L) t.look = L; else delete t.look; c.repaint(); }, also: 'Material, Shader, Style, Preset, Minecraft, Voxel, ASCII, X-ray' },
+  lookRow('Made of', 'form', { kind: 'choice', wrap: true, options: [['natural', 'Itself'], ['blocks', 'Blocks'], ['balls', 'Balls'], ['text', 'Text'], ['dots', 'Dots'], ['pixels', 'Pixels'], ['lines', 'Lines']], also: 'Voxel, Cube, ASCII, Halftone, Mosaic',
+    titles: { natural: 'Its own surface or cloud', blocks: 'Cubes on a lattice in the scene: they cast shadows, and water mirrors them', balls: 'Balls on a lattice in the scene', text: 'Letters in screen cells', dots: 'Dots in screen cells, as in a printed picture', pixels: 'Big square pixels in screen cells', lines: 'Lines in screen cells' } }),
+  lookRow('Shade', 'shade', { kind: 'choice', wrap: true, options: [['real', 'Real'], ['flat', 'Flat'], ['xray', 'X-ray'], ['glow', 'Glow'], ['metal', 'Metal']], also: 'Shader, Toon, Cel, Emissive',
+    titles: { real: 'Lit by the scene as it really would be', flat: 'A few flat bands of colour and a dark edge', xray: 'As on an X-ray film: the more of it on a line, the brighter', glow: 'It gives off light', metal: 'A mirror tinted by its colour' } }),
+  lookRow('Block size', 'blockSize', { kind: 'slider', min: 2, max: 60, step: 0.5, unit: ' cm', when: solidLook, get: t => LV(t, 'blockSize') * 100, set: (t, v) => setLook(t, 'blockSize', v / 100), def: () => LOOK_DEFAULTS.blockSize * 100, also: 'Voxel size', help: 'How wide each block is. Never finer than a cell of the simulation box.' }),
+  lookRow('Filled from', 'fill', { kind: 'slider', min: 0.01, max: 1, step: 0.01, when: solidLook, also: 'Threshold, Iso', help: 'How much of a place must be this fluid before it gets a block: lower gives more, higher fewer.' }),
+  lookRow('Face pixels', 'pixels', { kind: 'slider', min: 1, max: 64, step: 1, when: t => LV(t, 'form') === 'blocks', also: 'Texture resolution', help: 'A block\'s face is a little picture of this many pixels a side, each a little lighter or darker.' }),
+  lookRow('Roughness', 'rough', { kind: 'slider', min: 0, max: 1, step: 0.01, when: t => LV(t, 'form') === 'balls' || LV(t, 'shade') === 'metal', also: 'Roughness' }),
+  lookRow('Cell size', 'cellSize', { kind: 'slider', min: 4, max: 48, step: 1, unit: ' px', when: cellLook, also: 'Font size, Dot size', help: 'How big each letter, dot, pixel or line is on screen.' }),
+  lookRow('Letters', 'chars', { kind: 'text', when: textLook, also: 'ASCII, Characters, Text', help: 'The signs to use, as many as 32: any you can type. They are put in order by how much ink each has, unless they repeat.' }),
+  lookRow('Repeat them', 'repeat', { kind: 'toggle', when: textLook, also: 'Random, Matrix', help: 'Off: a brighter place takes a denser sign. On: the signs flicker at random, as they are, whatever the brightness.' }),
+  lookRow('Ground', 'backing', { kind: 'slider', min: 0, max: 1, step: 0.005, when: cellLook, also: 'Background', help: 'A colour behind the marks, in each cell the fluid fills. 0: the scene shows between them.' }),
+  lookRow('Ground colour', 'backColor', { kind: 'color', when: t => cellLook(t) && LV(t, 'backing') > 0, def: undefined }),
+  lookRow('Colour from', 'colorMode', { kind: 'choice', options: [['own', 'Own'], ['one', 'One'], ['ramp', 'Two']], also: 'Gradient, Ramp', titles: { own: 'The source\'s colour, and what it mixes to', one: 'One colour picked here', ramp: 'From the first colour, where there is little, to the second, where there is most' } }),
+  lookRow('Colour', 'colorA', { kind: 'color', when: t => LV(t, 'colorMode') !== 'own', def: undefined }),
+  lookRow('To colour', 'colorB', { kind: 'color', when: t => LV(t, 'colorMode') === 'ramp', def: undefined }),
+  lookRow('Strength', 'strength', { kind: 'slider', min: 0, max: 4, step: 0.05, when: shadeIs('xray', 'glow'), also: 'Intensity, Emissive', help: 'How much it shows for how much of it there is.' }),
+  lookRow('Bands', 'bands', { kind: 'slider', min: 1, max: 12, step: 1, when: shadeIs('flat'), also: 'Posterize, Toon', help: 'How many steps of light.' }),
+  lookRow('Edge', 'edge', { kind: 'slider', min: 0, max: 1.5, step: 0.01, when: shadeIs('flat', 'xray', 'glow'), also: 'Outline, Fresnel, Rim', help: 'How strong and how wide its edge is.' }),
+  lookRow('Own light', 'emission', { kind: 'slider', min: 0, max: 8, step: 0.05, when: t => LV(t, 'shade') === 'real', also: 'Emissive, Lava, Fire', help: 'It gives off light in its colour, broken by a moving pattern as much as Grain says.' }),
+  lookRow('Grain', 'grain', { kind: 'slider', min: 0, max: 1, step: 0.01, when: t => solidLook(t) || LV(t, 'emission') > 0, also: 'Noise, Crust', help: 'On blocks: how much the pixels of a face differ. With its own light: how much dark crust breaks it up.' }),
+  lookRow('Opacity', 'opacity', { kind: 'slider', min: 0, max: 1, step: 0.01, when: t => solidLook(t) || cellLook(t) || LV(t, 'shade') !== 'real', also: 'Alpha, Transparency' }),
+  lookRow('Shadow', 'shadow', { kind: 'slider', min: 0.02, max: 1, step: 0.01, when: isSmoke, also: 'Cast Shadow', help: 'How much of a shadow this smoke casts, and how much other smoke it darkens.' }),
+  { cat: 'fluidlook', kind: 'fluidpicture', label: 'Picture on it', on: fluidSources, also: 'Texture, Image, Map', help: 'A picture on the fluid: its colour comes from the picture, from the world\'s three sides, so the fluid moves through it. Or drop one here. A scene can show eight pictures on fluids.' },
+  lookRow('Tile size', 'tile', { kind: 'slider', log: true, min: 0.05, max: 20, step: 1, unit: ' m', when: picturedLook, also: 'Scale, Tiling', help: 'How wide one repeat of the picture is. On blocks, each face shows one whole repeat.' }),
+  lookRow('How much', 'picMix', { kind: 'slider', min: 0, max: 1, step: 0.01, when: picturedLook, also: 'Opacity, Strength' }),
+  lookRow('Drift', 'drift', { kind: 'slider', min: -2, max: 2, step: 0.01, unit: ' m/s', when: picturedLook, also: 'Scroll, Pan, Speed', help: 'The picture moves up or down through the fluid.' }),
+
+  ...OWN_SETTINGS.smoke.map(k => ownOf('smoke', k)),
+  ...OWN_SETTINGS.liquid.map(k => ownOf('liquid', k)),
+  { cat: 'fluidown', kind: 'action', label: 'Back to the scene\'s settings', title: 'Forget this fluid\'s own settings: it does as the Fluids tab says.', on: fluidSources, when: t => !!(t.own && Object.keys(t.own).length), run: t => { delete t.own; } },
 
   { cat: 'aim', kind: 'dial', label: 'Compass', on: it => (it.kind === 'emitter' && !it.attach && !it.sink) || (isLight(it) && it.type !== 'point') ? [it] : [], get: t => aim(t).az,
     set: (t, v) => { t.dir = fromAngles(v, aim(t).el); }, also: 'Rotation' },
@@ -240,36 +337,36 @@ export const SETTINGS = [
   decalRow('Flip across', 'flipX', { kind: 'toggle', def: undefined, get: d => !!decalValue(d, 'flipX') }),
   decalRow('Flip up', 'flipY', { kind: 'toggle', def: undefined, get: d => !!decalValue(d, 'flipY') }),
 
-  { cat: 'physics', kind: 'toggle', label: 'Has weight: falls, can be pushed', on: objects, get: t => !!t.moves, also: 'Simulate Physics',
+  { cat: 'physics', kind: 'toggle', label: 'Has weight: falls, can be pushed', on: rigid, get: t => !!t.moves, also: 'Simulate Physics',
     set: (t, v, c) => { t.moves = v; if (v && motionOn(t.motion)) { t.motion.travel = 'none'; t.motion.spin = 0; t.motion.bob = 0; c.repaint(); } t.home = { pos: [...t.pos], rot: [...t.rot] }; c.repaintSoon(); },
     help: 'On: it falls, stacks, tumbles, and water and wind push it. Off: it stays where it is put (or follows its motion).' },
-  { cat: 'physics', kind: 'pick', label: 'Made of', options: Object.entries(MATERIALS).map(([k, m]) => [k, `${m.label} (${m.density} kg/m³)`]), on: objects, get: t => t.material || 'wood', set: (t, v, c) => { t.material = v; c.repaintSoon(); },
+  { cat: 'physics', kind: 'pick', label: 'Made of', options: Object.entries(MATERIALS).map(([k, m]) => [k, `${m.label} (${m.density} kg/m³)`]), on: rigid, get: t => t.material || 'wood', set: (t, v, c) => { t.material = v; c.repaintSoon(); },
     def: () => 'wood', help: 'Sets how heavy it is for its size, whether it floats, and its grip and bounce.', also: 'Phys Material Override, Density' },
-  { cat: 'physics', kind: 'readout', label: 'Mass', on: objects, also: 'Mass in KG' },
-  { cat: 'physics', kind: 'numbers', label: 'Mass (kg)', keys: ['kg'], step: 0.1, on: objects, when: t => !!t.moves, also: 'Mass in KG, Override Mass',
+  { cat: 'physics', kind: 'readout', label: 'Mass', on: rigid, also: 'Mass in KG' },
+  { cat: 'physics', kind: 'numbers', label: 'Mass (kg)', keys: ['kg'], step: 0.1, on: rigid, when: t => !!t.moves, also: 'Mass in KG, Override Mass',
     get: (t, i, c) => { const m = c.vp.physics.massOf(t); return t.massKg > 0 ? t.massKg : m ? +m.mass.toFixed(3) : 0; }, set: (t, i, v, c) => { t.massKg = Math.max(0, v); c.repaintSoon(); },
     isDef: t => !t.massKg, toDef: (t, c) => { delete t.massKg; c.repaintSoon(); }, help: 'Type a mass to set it by hand; the arrow goes back to what its material and size give.' },
-  { cat: 'physics', kind: 'toggle', label: 'Gravity', on: objects, when: t => !!t.moves, get: t => !t.noGravity, set: (t, v) => { if (v) delete t.noGravity; else t.noGravity = true; }, def: () => true, also: 'Enable Gravity', help: 'Off: it floats where it is until something pushes it.' },
-  { cat: 'physics', kind: 'slider', label: 'Air drag', min: 0, max: 5, step: 0.05, on: objects, when: t => !!t.moves, get: t => t.linDamp || 0, set: (t, v) => { t.linDamp = v; }, def: () => 0, also: 'Linear Damping', help: 'Slows it down as it moves.' },
-  { cat: 'physics', kind: 'slider', label: 'Spin drag', min: 0, max: 5, step: 0.05, on: objects, when: t => !!t.moves, get: t => t.angDamp || 0, set: (t, v) => { t.angDamp = v; }, def: () => 0, also: 'Angular Damping', help: 'Slows its turning.' },
-  { cat: 'physics', kind: 'slider', label: 'Bounce', min: 0, max: 1, step: 0.01, on: objects, get: t => t.bounce ?? (MATERIALS[t.material] || MATERIALS.wood).bounce, set: (t, v) => { t.bounce = v; },
+  { cat: 'physics', kind: 'toggle', label: 'Gravity', on: rigid, when: t => !!t.moves, get: t => !t.noGravity, set: (t, v) => { if (v) delete t.noGravity; else t.noGravity = true; }, def: () => true, also: 'Enable Gravity', help: 'Off: it floats where it is until something pushes it.' },
+  { cat: 'physics', kind: 'slider', label: 'Air drag', min: 0, max: 5, step: 0.05, on: rigid, when: t => !!t.moves, get: t => t.linDamp || 0, set: (t, v) => { t.linDamp = v; }, def: () => 0, also: 'Linear Damping', help: 'Slows it down as it moves.' },
+  { cat: 'physics', kind: 'slider', label: 'Spin drag', min: 0, max: 5, step: 0.05, on: rigid, when: t => !!t.moves, get: t => t.angDamp || 0, set: (t, v) => { t.angDamp = v; }, def: () => 0, also: 'Angular Damping', help: 'Slows its turning.' },
+  { cat: 'physics', kind: 'slider', label: 'Bounce', min: 0, max: 1, step: 0.01, on: rigid, get: t => t.bounce ?? (MATERIALS[t.material] || MATERIALS.wood).bounce, set: (t, v) => { t.bounce = v; },
     isDef: t => t.bounce === undefined, toDef: t => { delete t.bounce; }, also: 'Restitution', help: 'How much it bounces back. The arrow goes back to what its material gives.' },
-  { cat: 'physics', kind: 'slider', label: 'Grip', min: 0, max: 1.5, step: 0.01, on: objects, get: t => t.grip ?? (MATERIALS[t.material] || MATERIALS.wood).friction, set: (t, v) => { t.grip = v; },
+  { cat: 'physics', kind: 'slider', label: 'Grip', min: 0, max: 1.5, step: 0.01, on: rigid, get: t => t.grip ?? (MATERIALS[t.material] || MATERIALS.wood).friction, set: (t, v) => { t.grip = v; },
     isDef: t => t.grip === undefined, toDef: t => { delete t.grip; }, also: 'Friction', help: 'How much it slides. The arrow goes back to what its material gives.' },
-  { cat: 'physics', kind: 'action', label: 'Put back', title: 'Back to where it was put, still.', on: objects, when: t => !!t.moves, run: t => { if (t.home) { t.pos = [...t.home.pos]; t.rot = [...t.home.rot]; } }, also: 'Reset' },
+  { cat: 'physics', kind: 'action', label: 'Put back', title: 'Back to where it was put, still.', on: rigid, when: t => !!t.moves, run: t => { if (t.home) { t.pos = [...t.home.pos]; t.rot = [...t.home.rot]; } }, also: 'Reset' },
 
   { cat: 'collision', kind: 'choice', label: 'Blocks', wrap: true, options: [['all', 'All'], ['objects', 'Objects'], ['fluids', 'Fluids'], ['none', 'None']], on: objects, also: 'Collision Presets, BlockAll, NoCollision',
     get: t => t.collides !== false ? (blocksFluid(t) ? 'all' : 'objects') : blocksFluid(t) ? 'fluids' : 'none',
     set: (t, v) => { t.collides = v === 'all' || v === 'objects'; t.blocksFluid = v === 'all' || v === 'fluids'; },
     def: () => 'all', titles: { all: 'Objects bump it, and smoke and water flow round it', objects: 'Objects bump it; smoke and water pass through', fluids: 'Smoke and water flow round it; objects pass through', none: 'Everything passes through (with weight, it still lands on the ground)' } },
 
-  { cat: 'motion', kind: 'choice', label: 'Travel', options: [['none', 'Stays'], ['loop', 'Loop'], ['swing', 'There and back']], wrap: true, on: objects, get: t => (t.motion && t.motion.travel) || 'none', also: 'Rotating Movement, Interp To Movement',
+  { cat: 'motion', kind: 'choice', label: 'Travel', options: [['none', 'Stays'], ['loop', 'Loop'], ['swing', 'There and back']], wrap: true, on: rigid, get: t => (t.motion && t.motion.travel) || 'none', also: 'Rotating Movement, Interp To Movement',
     set: (t, v, c) => { M(t).travel = v; motionChanged(t, c); }, titles: { none: 'Stays where it was put', loop: 'Goes the distance, then starts again from where it was put', swing: 'Goes the distance and comes back' }, help: 'Moves on its own while the simulation plays; the fluids feel it.' },
-  { cat: 'motion', kind: 'dial', label: 'Toward', on: objects, when: t => t.motion && t.motion.travel !== 'none', get: t => M(t).dir, set: (t, v) => { M(t).dir = v; } },
-  { cat: 'motion', kind: 'slider', label: 'Speed', min: 0, max: 3, step: 0.01, unit: ' m/s', on: objects, when: t => t.motion && t.motion.travel !== 'none', get: t => M(t).speed, set: (t, v) => { M(t).speed = v; }, def: () => 0.3 },
-  { cat: 'motion', kind: 'slider', label: 'Distance', min: 0.1, max: 16, step: 0.1, unit: ' m', on: objects, when: t => t.motion && t.motion.travel !== 'none', get: t => M(t).distance, set: (t, v) => { M(t).distance = v; }, def: () => 4, help: 'How far it goes before it starts again (or turns back).' },
-  { cat: 'motion', kind: 'slider', label: 'Spin', min: -180, max: 180, step: 1, unit: '°/s', on: objects, get: t => (t.motion && t.motion.spin) || 0, set: (t, v, c) => { M(t).spin = v; motionChanged(t, c); }, def: () => 0, help: 'Turns about up, degrees a second (minus: the other way).', also: 'Rotation Rate' },
-  { cat: 'motion', kind: 'slider', label: 'Bob', min: 0, max: 10, step: 0.5, unit: ' cm', on: objects, get: t => ((t.motion && t.motion.bob) || 0) * 100, set: (t, v, c) => { M(t).bob = v / 100; motionChanged(t, c); }, def: () => 0, help: "A walker's bounce." },
+  { cat: 'motion', kind: 'dial', label: 'Toward', on: rigid, when: t => t.motion && t.motion.travel !== 'none', get: t => M(t).dir, set: (t, v) => { M(t).dir = v; } },
+  { cat: 'motion', kind: 'slider', label: 'Speed', min: 0, max: 3, step: 0.01, unit: ' m/s', on: rigid, when: t => t.motion && t.motion.travel !== 'none', get: t => M(t).speed, set: (t, v) => { M(t).speed = v; }, def: () => 0.3 },
+  { cat: 'motion', kind: 'slider', label: 'Distance', min: 0.1, max: 16, step: 0.1, unit: ' m', on: rigid, when: t => t.motion && t.motion.travel !== 'none', get: t => M(t).distance, set: (t, v) => { M(t).distance = v; }, def: () => 4, help: 'How far it goes before it starts again (or turns back).' },
+  { cat: 'motion', kind: 'slider', label: 'Spin', min: -180, max: 180, step: 1, unit: '°/s', on: rigid, get: t => (t.motion && t.motion.spin) || 0, set: (t, v, c) => { M(t).spin = v; motionChanged(t, c); }, def: () => 0, help: 'Turns about up, degrees a second (minus: the other way).', also: 'Rotation Rate' },
+  { cat: 'motion', kind: 'slider', label: 'Bob', min: 0, max: 10, step: 0.5, unit: ' cm', on: rigid, get: t => ((t.motion && t.motion.bob) || 0) * 100, set: (t, v, c) => { M(t).bob = v / 100; motionChanged(t, c); }, def: () => 0, help: "A walker's bounce." },
 
   { cat: 'draw', kind: 'toggle', label: 'Visible', on: it => (isObject(it) || it.kind === 'emitter' || it.kind === 'mark') ? [it] : [], get: t => !t.hidden, set: (t, v) => { if (v) delete t.hidden; else t.hidden = true; }, def: () => true, list: true, also: 'Visible, Actor Hidden In Game',
     help: 'Off: not drawn and not clickable in the view (the eye in the list); it still works: the fluids and objects still feel it.' },
@@ -284,9 +381,9 @@ function rowFor(p, things, ctx) {
   const live = () => ts.filter(t => !p.when || p.when(t));
   const get = i => { const l = live(); if (!l.length) return p.kind === 'numbers' ? 0 : false; return readAll(l, p.kind === 'numbers' ? t => p.get(t, i, ctx) : t => p.get(t, ctx)); };
   const first = () => p.get(live()[0] || ts[0], ctx);
-  const after = () => { if (p.list) ctx.paintList(); if ((p.cat === 'texture' || p.cat === 'decals') && ['choice', 'toggle', 'pick'].includes(p.kind)) ctx.repaint(); };
+  const after = () => { if (p.list) ctx.paintList(); if ((p.cat === 'texture' || p.cat === 'decals' || p.cat === 'fluidlook' || p.cat === 'soft') && ['choice', 'toggle', 'pick'].includes(p.kind)) ctx.repaint(); else if (p.cat === 'fluidlook' && p.label === 'Ground') ctx.repaint(); };
   const set = v => { for (const t of ts) p.set(t, v, ctx); after(); };
-  const tag = p.also ? `\nUnreal: ${p.also}` : '';
+  const tag = p.known ? `\n${p.known}` : p.also ? `\nUnreal: ${p.also}` : '';
   const help = (p.help || '') + tag;
   const val = t => p.kind === 'numbers' ? p.get(t, 0, ctx) : p.get(t, ctx), put = (t, v) => { if (p.kind === 'numbers') p.set(t, 0, v, ctx); else p.set(t, v, ctx); };
   const resets = p.isDef ? { isDefault: () => ts.every(t => p.isDef(t)), toDefault: () => { for (const t of ts) p.toDef(t, ctx); after(); } }
@@ -296,7 +393,24 @@ function rowFor(p, things, ctx) {
     case 'slider': row = slider({ label: p.label, min: p.min, max: p.max, step: p.step, unit: p.unit, log: p.log, slot: p.slot ? slotFor(p.slot, ts, ctx) : p.cat === 'material' ? el('span') : undefined, help, commit, get, first, set, ...resets }); break;
     case 'toggle': row = toggle({ label: p.label, help, commit, get, set }); break;
     case 'color': row = color({ label: p.label, slot: p.slot ? slotFor(p.slot, ts, ctx) : undefined, help, commit, get, first, set }); break;
-    case 'choice': row = choice({ label: p.label, options: p.options, wrap: p.wrap, titles: p.titles, help, commit, get, set, ...resets }); break;
+    case 'choice': row = choice({ label: p.noLabel ? undefined : p.label, options: p.options, wrap: p.wrap, titles: p.titles, help, commit, get, set, ...resets }); break;
+    case 'text': row = text({ label: p.label, help, commit, get: () => { const v = get(); return v === MIXED ? '' : v; }, set }); break;
+    case 'fluidpicture': {
+      const put = async file => {
+        try {
+          const id = await vp.addImage(file, file.name);
+          for (const t of ts) setLook(t, 'picture', id);
+          commit(); ctx.repaint();
+        } catch (e) { console.error(e); ctx.say && ctx.say('Could not use it: ' + e.message); }
+      };
+      const slot = mapSlot({ label: p.label, get: () => { const t = ts.find(x => LV(x, 'picture')); return t ? t.look.picture : null; }, thumb: id => thumbFor(vp, id), pick: () => pickImageFile(put), dropped: put,
+        menu: (x, y) => ctx.menu(x, y, [
+          ['open', 'Another picture…', () => pickImageFile(put)],
+          ['trash', 'Take it out', () => { for (const t of ts) if (t.look) { delete t.look.picture; } commit(); ctx.repaint(); }],
+        ]) });
+      row = el('div', { class: 'row has-slot', title: help }, el('label', {}, p.label), el('span'), el('span'), slot);
+      break;
+    }
     case 'pick': row = pick({ label: p.label, options: typeof p.options === 'function' ? () => p.options(ts, ctx) : p.options, help, commit, get, set, ...resets }); break;
     case 'slotonly': row = el('div', { class: 'row has-slot', title: help }, el('label', {}, p.label), el('span'), el('span'), slotFor(p.slot, ts, ctx)); break;
     case 'partpick': {
@@ -350,6 +464,21 @@ function rowFor(p, things, ctx) {
     case 'swatches': row = el('div', { class: 'stackrow', title: help }, el('label', {}, p.label), swatches({ commit, items: SWATCHES.map(s => ({ label: s.label, color: s.color, clear: s.finish === 'glass' || s.finish === 'frosted',
       apply: () => { for (const t of ts) { t.color = hexToRgb(s.color); t.finish = s.finish; delete t.pbr; } ctx.repaint(); ctx.paintList(); } })) })); break;
     case 'action': row = el('div', { class: 'btns' }, button(p.label, () => { for (const t of live()) p.run(t, ctx); ctx.repaint(); if (!p.noCommit) commit(); }, { title: p.title })); break;
+    case 'softinfo': {
+      const text = el('p', { class: 'note' });
+      row = text;
+      text.paint = () => {
+        const b = ts.length === 1 ? vp.soft.bodies.get(ts[0].id) : null;
+        if (!b) { text.textContent = ts.length > 1 ? `${ts.length} soft things.` : 'Being made.'; return; }
+        if (b.failed) { text.textContent = b.failed; return; }
+        const R = b.reading(), mass = R.mass < 10 ? R.mass.toFixed(2) : fmtN(R.mass);
+        const air = b.kind === 'balloon' ? (b.closed ? ` Inside ${R.volume >= 10 ? fmtN(R.volume * 1000) : (R.volume * 1000).toFixed(1)} litres, ${Math.abs(b.pressureNow) < 1000 ? fmtN(b.pressureNow) + ' Pa' : (b.pressureNow / 1000).toFixed(1) + ' kPa'} over the air outside.` : ` It has holes, ${b.openEdges} edges open: it cannot hold air. Close the shape, or use Pressure.`) : '';
+        const trouble = b.hadTrouble ? ` It went wrong ${b.hadTrouble} time${b.hadTrouble > 1 ? 's' : ''} and was put back: try less extreme settings, or more Steps.` : '';
+        text.textContent = `${fmtN(R.points)} points, cell ${(R.cell * 100).toFixed(1)} cm, ${mass} kg${R.asleep ? ', at rest' : ''}. On the processor: ${vp.soft.stats.ms.toFixed(1)} ms a frame for all soft things.${air}${trouble}`;
+      };
+      setTimeout(() => text.paint(), 50);
+      break;
+    }
     case 'readout': {
       const text = el('p', { class: 'note' });
       row = text;
@@ -369,7 +498,7 @@ function rowFor(p, things, ctx) {
     row.paint = () => { row.hidden = !live().length; if (!row.hidden && inner) inner(); };
     row.paint();
   }
-  row.dataset.find = `${p.label} ${CATS[p.cat]} ${p.also || ''}`.toLowerCase();
+  row.dataset.find = `${p.label} ${CATS[p.cat]} ${p.also || ''} ${p.known || ''}`.toLowerCase();
   return { row, count: things.filter(it => p.on(it, vp).length).length };
 }
 

@@ -1,4 +1,5 @@
-import { SHAPES_WGSL } from './sdf.wgsl.js';
+import { SHAPES_WGSL, FLUID_ROWS } from './sdf.wgsl.js';
+import { FLUID_LOOK_WGSL } from './fluidlook.wgsl.js';
 
 export const MAX_LIGHTS = 8, LIGHT_LAYERS = 24, LIGHT_SHADOW_SIZE = 2048, LIGHT_NEAR = 0.05;
 export const LIGHT_FLOATS = 24;
@@ -110,6 +111,12 @@ fn quadCorner(vi: u32) -> vec2<f32> {
   return c[vi];
 }
 
+fn gridCorner(c: vec4<f32>) -> vec4<f32> {
+  let n = F.liquidCol.w;
+  if (n < 1.0 || c.w <= 0.0) { return c; }
+  let g = vec2<f32>(n, n * F.screen.y / F.screen.x) * 0.5;
+  return vec4<f32>(round(c.xy / c.w * g) / g * c.w, c.z, c.w);
+}
 fn viewTurn() -> mat3x3<f32> { return mat3x3<f32>(F.view[0].xyz, F.view[1].xyz, F.view[2].xyz); }
 fn ndcOf(fc: vec2<f32>) -> vec2<f32> {
   return vec2<f32>(fc.x * F.screen.z * 2.0 - 1.0, 1.0 - fc.y * F.screen.w * 2.0);
@@ -523,11 +530,31 @@ const GROUND_MAT = ${MAX_DRAW}u;
 @group(0) @binding(19) var envSamp: sampler;
 @group(0) @binding(20) var smokeLocal: texture_3d<f32>;
 @group(0) @binding(21) var causticTex: texture_2d<f32>;
+@group(0) @binding(22) var<uniform> FT: array<Fluid, ${FLUID_ROWS}>;
+@group(0) @binding(23) var<storage, read> BK: array<vec4<f32>>;
+@group(0) @binding(24) var<storage, read> art: array<u32>;
 @group(1) @binding(0) var opaqueDepth: texture_depth_2d;
 @group(1) @binding(1) var glassFirst: texture_2d<f32>;
 `;
 
-export const SCENE_SHADER = FRAME_WGSL + MATERIAL_WGSL + SCENE_BINDINGS + SKY_WGSL + LIGHTING_WGSL +  `
+export const BLOCKS_MOST = 300000;
+const CUBE_WGSL =  `
+const BLOCKS_MOST = ${BLOCKS_MOST}u;
+fn cubeCorner(vi: u32) -> vec3<f32> {
+  var f = array<vec3<f32>, 6>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, -1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 0.0, -1.0));
+  var u = array<vec3<f32>, 6>(vec3<f32>(0.0, 0.0, -1.0), vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-1.0, 0.0, 0.0));
+  var v = array<vec3<f32>, 6>(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, -1.0), vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0));
+  let c = quadCorner(vi % 6u);
+  let k = vi / 6u;
+  return f[k] + u[k] * c.x + v[k] * c.y;
+}
+fn cubeFace(vi: u32) -> vec3<f32> {
+  var f = array<vec3<f32>, 6>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, -1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 0.0, -1.0));
+  return f[vi / 6u];
+}
+`;
+
+export const SCENE_SHADER = FRAME_WGSL + MATERIAL_WGSL + SCENE_BINDINGS + SKY_WGSL + LIGHTING_WGSL + FLUID_LOOK_WGSL + CUBE_WGSL +  `
 fn clearNear(layer: i32, uv: vec2<f32>) -> f32 {
   let a = textureGather(3, clearLight, linSamp, uv, layer);
   return min(a.x, min(a.y, min(a.z, a.w)));
@@ -992,7 +1019,7 @@ struct ObjOut {
   let o = D[id];
   let wp = worldOfLocal(p * o.b.xyz, o);
   let wn = normalize(worldDir(nrm / o.b.xyz, o));
-  return ObjOut(F.viewProj * vec4<f32>(wp, 1.0), wp, wn, id);
+  return ObjOut(gridCorner(F.viewProj * vec4<f32>(wp, 1.0)), wp, wn, id);
 }
 @fragment fn fsObj(i: ObjOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
   let o = D[i.id];
@@ -1033,21 +1060,26 @@ struct ObjTexOut {
   let lp = p * o.b.xyz;
   let wp = worldOfLocal(lp, o);
   let ln = normalize(nrm / o.b.xyz);
-  return ObjTexOut(F.viewProj * vec4<f32>(wp, 1.0), wp, normalize(worldDir(ln, o)), id, lp, ln, vec2<f32>(0.0));
+  return ObjTexOut(gridCorner(F.viewProj * vec4<f32>(wp, 1.0)), wp, normalize(worldDir(ln, o)), id, lp, ln, vec2<f32>(0.0));
 }
 @vertex fn vsObjUv(@location(0) p: vec3<f32>, @location(1) nrm: vec3<f32>, @location(2) uv: vec2<f32>, @builtin(instance_index) id: u32) -> ObjTexOut {
   let o = D[id];
   let lp = p * o.b.xyz;
   let wp = worldOfLocal(lp, o);
   let ln = normalize(nrm / o.b.xyz);
-  return ObjTexOut(F.viewProj * vec4<f32>(wp, 1.0), wp, normalize(worldDir(ln, o)), id, lp, ln, uv);
+  return ObjTexOut(gridCorner(F.viewProj * vec4<f32>(wp, 1.0)), wp, normalize(worldDir(ln, o)), id, lp, ln, uv);
+}
+@vertex fn vsObjSoft(@location(0) p: vec3<f32>, @location(1) nrm: vec3<f32>, @location(2) lp: vec3<f32>, @location(3) ln: vec3<f32>, @location(4) uv: vec2<f32>, @builtin(instance_index) id: u32) -> ObjTexOut {
+  let o = D[id];
+  let wp = worldOfLocal(p * o.b.xyz, o);
+  return ObjTexOut(gridCorner(F.viewProj * vec4<f32>(wp, 1.0)), wp, normalize(worldDir(nrm / o.b.xyz, o)), id, lp, ln, uv);
 }
 @vertex fn vsObjDisp(@location(0) p: vec3<f32>, @location(1) nrm: vec3<f32>, @location(2) puff: vec3<f32>, @location(3) uv: vec2<f32>, @builtin(instance_index) id: u32) -> ObjTexOut {
   let o = D[id];
   let lp = p * o.b.xyz;
   let ln = normalize(nrm / o.b.xyz);
   let wp = worldOfLocal(lp + normalize(puff / o.b.xyz) * dispAt(MAT[id], lp, ln, uv, max(o.b.x, o.b.z)), o);
-  return ObjTexOut(F.viewProj * vec4<f32>(wp, 1.0), wp, normalize(worldDir(ln, o)), id, lp, ln, uv);
+  return ObjTexOut(gridCorner(F.viewProj * vec4<f32>(wp, 1.0)), wp, normalize(worldDir(ln, o)), id, lp, ln, uv);
 }
 @fragment fn fsObjTex(i: ObjTexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
   let dlx = dpdx(i.lp);
@@ -1200,7 +1232,7 @@ struct DotFrag { @location(0) color: vec4<f32>, @builtin(frag_depth) depth: f32 
   let r = F.liquid.y;
   var o: DotOut;
   o.pos = F.proj * vec4<f32>(vc + vec3<f32>(c * r, 0.0), 1.0);
-  if (PP[ii].w > 0.5) { o.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0); }
+  if (PP[ii].w > 0.5 || FT[u32(-PP[ii].w)].c.w == 1.0) { o.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0); }
   o.uv = c;
   o.vc = vc;
   o.wc = wp;
@@ -1222,6 +1254,94 @@ struct DotFrag { @location(0) color: vec4<f32>, @builtin(frag_depth) depth: f32 
   return o;
 }
 
+fn shd0(w: u32) -> u32 { return u32(FT[w].d.x + 0.5); }
+struct BlockOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) wp: vec3<f32>,
+  @location(1) lp: vec3<f32>,
+  @location(2) @interpolate(flat) n: vec3<f32>,
+  @location(3) @interpolate(flat) mid: vec4<f32>,
+  @location(4) @interpolate(flat) col: vec4<f32>,
+};
+fn blockVertex(vi: u32, at: u32) -> BlockOut {
+  let A = BK[at * 2u];
+  let B = BK[at * 2u + 1u];
+  let lp = cubeCorner(vi);
+  let wp = A.xyz + lp * A.w;
+  return BlockOut(gridCorner(F.viewProj * vec4<f32>(wp, 1.0)), wp, lp, cubeFace(vi), A, B);
+}
+@vertex fn vsBlock(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> BlockOut { return blockVertex(vi, ii); }
+@vertex fn vsBlockClear(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> BlockOut { return blockVertex(vi, BLOCKS_MOST + ii); }
+struct BlockSeen { c: vec4<f32>, depth: f32 };
+fn blockSeen(i: BlockOut) -> BlockSeen {
+  let w = u32(i.col.w);
+  let half2 = i.mid.w;
+  var wp = i.wp;
+  var n = i.n;
+  var depth = i.pos.z;
+  let v0 = normalize(F.eye.xyz - wp);
+  var uv = vec2<f32>(0.0);
+  if (FT[w].i.w > 0.5) {
+    let oc = F.eye.xyz - i.mid.xyz;
+    let d = -v0;
+    let b = dot(oc, d);
+    let h = b * b - dot(oc, oc) + half2 * half2;
+    if (h < 0.0) { discard; }
+    let t = -b - sqrt(h);
+    wp = F.eye.xyz + d * t;
+    n = normalize(wp - i.mid.xyz);
+    let clip = F.viewProj * vec4<f32>(wp, 1.0);
+    depth = clip.z / clip.w;
+    uv = n.xz * 0.5 + 0.5;
+  } else {
+    let a = abs(i.n);
+    let q = i.lp * 0.5 + 0.5;
+    if (a.x > 0.5) { uv = vec2<f32>(q.z, 1.0 - q.y); } else if (a.y > 0.5) { uv = vec2<f32>(q.x, q.z); } else { uv = vec2<f32>(q.x, 1.0 - q.y); }
+  }
+  let px = max(FT[w].i.y, 1.0);
+  let cellOf = floor(uv * px);
+  let seed = dot(floor(i.mid.xyz / max(half2, 1e-3)), vec3<f32>(1.0, 57.0, 113.0)) + dot(i.n, vec3<f32>(5.0, 11.0, 17.0));
+  let speck = hash21(cellOf + vec2<f32>(seed, seed * 0.37)) - 0.5;
+  var base = fluidColour(w, i.col.rgb, 0.5 + 0.5 * n.y) * (1.0 + speck * FT[w].i.z * 1.2);
+  if (shd0(w) == 0u) { base = base * 0.6; }
+  if (FT[w].i.w < 0.5 && FT[w].i.z > 0.0) {
+    let e = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)) * px;
+    if (e < 1.0) { base = base * (1.0 - 0.3 * min(FT[w].i.z * 2.5, 1.0)); }
+  }
+  if (FT[w].g.x >= 0.0) {
+    let pic = artAt(FT[w].g.x, uv);
+    base = mix(base, pic.rgb, FT[w].g.z);
+  }
+  let shd = u32(FT[w].d.x + 0.5);
+  let op = FT[w].d.w;
+  let v = normalize(F.eye.xyz - wp);
+  var out = vec3<f32>(0.0);
+  if (shd == 1u) {
+    let l = clamp(max(dot(n, F.keyDir.xyz), 0.0) * shadowAt(wp, n, 4) * 0.8 + 0.3, 0.0, 1.0);
+    let bands = max(FT[w].h.x, 1.0);
+    out = pickedCol(base * (ceil(l * bands) / bands));
+  } else if (shd == 2u || shd == 3u) {
+    let rim = pow(1.0 - max(dot(n, v), 0.0), 2.0) * FT[w].h.y;
+    out = base * FT[w].f.w * (0.45 + rim);
+    return BlockSeen(vec4<f32>(out, 0.0), depth);
+  } else {
+    var S = Surf(base, 0.0, 0.62, 0.04, 0.0, FT[w].j.y, n);
+    if (shd == 4u) { S.metal = FT[w].j.w; S.rough = FT[w].j.z; }
+    else if (FT[w].i.w > 0.5) { S.rough = FT[w].j.z; }
+    out = litSurface(wp, S);
+  }
+  return BlockSeen(vec4<f32>(fogged(out, wp) * op, op), depth);
+}
+struct BlockFrag { @location(0) color: vec4<f32>, @builtin(frag_depth) depth: f32 };
+@fragment fn fsBlock(i: BlockOut) -> BlockFrag {
+  let s = blockSeen(i);
+  return BlockFrag(vec4<f32>(s.c.rgb, 1.0), s.depth);
+}
+@fragment fn fsBlockClear(i: BlockOut) -> BlockFrag {
+  let s = blockSeen(i);
+  return BlockFrag(s.c, s.depth);
+}
+
 @vertex fn vsLines(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
   var e = array<vec3<f32>, 24>(
     vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 1.0),
@@ -1239,12 +1359,18 @@ struct DotFrag { @location(0) color: vec4<f32>, @builtin(frag_depth) depth: f32 
 `;
 
 
-export const SHADOW_SHADER = FRAME_WGSL + MATERIAL_WGSL +  `
+export const SHADOW_SHADER = FRAME_WGSL + MATERIAL_WGSL + CUBE_WGSL +  `
 @group(0) @binding(0) var<uniform> F: Frame;
 @group(0) @binding(1) var<storage, read> D: array<Obj>;
 @group(0) @binding(2) var<storage, read> PP: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> PC: array<vec4<f32>>;
+@group(0) @binding(4) var<uniform> FT: array<Fluid, ${FLUID_ROWS}>;
+@group(0) @binding(5) var<storage, read> BK: array<vec4<f32>>;
 
+@vertex fn vsShadowBlock(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> @builtin(position) vec4<f32> {
+  let A = BK[ii * 2u];
+  return F.shadowVP * vec4<f32>(A.xyz + cubeCorner(vi) * A.w, 1.0);
+}
 @vertex fn vsShadowObj(@location(0) p: vec3<f32>, @location(1) nrm: vec3<f32>, @builtin(instance_index) id: u32) -> @builtin(position) vec4<f32> {
   let o = D[id];
   return F.shadowVP * vec4<f32>(worldOfLocal(p * o.b.xyz, o), 1.0);
@@ -1282,12 +1408,12 @@ fn glassTaken(i: GlassLit, toLight: vec3<f32>, along: f32, middle: f32) -> vec4<
   return glassTaken(i, to / along, along, length(D[i.id].a.xyz - F.lightN.yzw));
 }
 
-struct WaterLit { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) at: vec3<f32>, @location(2) dye: vec3<f32> };
+struct WaterLit { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) at: vec3<f32>, @location(2) dye: vec3<f32>, @location(3) clarity: f32 };
 @vertex fn vsWaterLight(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> WaterLit {
   let c = quadCorner(vi);
-  if (PP[ii].w > 0.5) { return WaterLit(vec4<f32>(0.0, 0.0, 2.0, 1.0), c, vec3<f32>(0.0), vec3<f32>(0.0)); }
+  if (PP[ii].w > 0.5 || FT[u32(-PP[ii].w)].c.w == 1.0) { return WaterLit(vec4<f32>(0.0, 0.0, 2.0, 1.0), c, vec3<f32>(0.0), vec3<f32>(0.0), 0.0); }
   let wp = PP[ii].xyz + (F.shadowRight.xyz * c.x + F.shadowUp.xyz * c.y) * F.liquid.y * 1.3;
-  return WaterLit(F.shadowVP * vec4<f32>(wp, 1.0), c, PP[ii].xyz, PC[ii].xyz);
+  return WaterLit(F.shadowVP * vec4<f32>(wp, 1.0), c, PP[ii].xyz, PC[ii].xyz, FT[u32(-PP[ii].w)].b.w);
 }
 fn waterTaken(i: WaterLit, along: f32) -> vec4<f32> {
   let r2 = dot(i.uv, i.uv);
@@ -1295,7 +1421,7 @@ fn waterTaken(i: WaterLit, along: f32) -> vec4<f32> {
   let cell = F.liqMin.w;
   let R = F.liquid.y * 1.3;
   let depth = 3.0 * (cell * cell * cell / 8.0) / (2.0 * PI * R * R) * sqrt(1.0 - r2);
-  let clarity = F.liquid.z;
+  let clarity = i.clarity;
   let murk = 1.0 - clarity;
   return vec4<f32>(depth * (i.dye * mix(30.0, 1.5, clarity) * 0.72 + vec3<f32>(0.15 + 60.0 * murk * murk * murk)), along);
 }
@@ -1499,6 +1625,7 @@ export const FLUID_SHADER = FRAME_WGSL +  `
 @group(0) @binding(2) var<storage, read> PC: array<vec4<f32>>;
 @group(0) @binding(3) var sceneDepth: texture_depth_2d;
 @group(0) @binding(4) var bodyFar: texture_2d<f32>;
+@group(0) @binding(5) var<uniform> FT: array<Fluid, ${FLUID_ROWS}>;
 
 struct FOut {
   @builtin(position) pos: vec4<f32>,
@@ -1511,7 +1638,7 @@ struct FOut {
   let vc = (F.view * vec4<f32>(PP[ii].xyz, 1.0)).xyz;
   var o: FOut;
   o.pos = F.proj * vec4<f32>(vc + vec3<f32>(c * F.liquid.y, 0.0), 1.0);
-  if (PP[ii].w > 0.5) { o.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0); }
+  if (PP[ii].w > 0.5 || FT[u32(-PP[ii].w)].c.w == 1.0) { o.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0); }
   o.uv = c;
   o.vc = vc;
   o.dye = PC[ii].xyz;
@@ -1847,13 +1974,41 @@ export const COMPOSITE_SHADER = FRAME_WGSL +  `
 @group(0) @binding(17) var smokeLocal: texture_3d<f32>;
 @group(0) @binding(18) var glassNear: texture_2d<f32>;
 @group(0) @binding(19) var glassNearTaken: texture_2d<f32>;
+@group(0) @binding(20) var<uniform> FT: array<Fluid, ${FLUID_ROWS}>;
+@group(0) @binding(21) var<storage, read> whoSmoke: array<u32>;
+@group(0) @binding(22) var<storage, read> whoWater: array<u32>;
+@group(0) @binding(23) var<storage, read> art: array<u32>;
+@group(0) @binding(24) var<storage, read> cells: array<vec4<f32>>;
 const FIELD_DEPTH = 1.4;
 fn clearKey(wp: vec3<f32>) -> vec3<f32> { return vec3<f32>(1.0); }
 fn clearLocal(L: Light, wp: vec3<f32>) -> vec3<f32> { return vec3<f32>(1.0); }
-` + SKY_WGSL + LIGHTING_WGSL + LIQUID_WGSL +  `
+` + SKY_WGSL + LIGHTING_WGSL + LIQUID_WGSL + FLUID_LOOK_WGSL +  `
 @vertex fn vsFull(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
   var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -3.0), vec2<f32>(3.0, 1.0), vec2<f32>(-1.0, 1.0));
   return vec4<f32>(p[vi], 0.0, 1.0);
+}
+
+fn smokeWhoAt(p: vec3<f32>) -> u32 {
+  let c = clamp(vec3<i32>(floor((p - F.smokeMin.xyz) / F.smokeDims.w)), vec3<i32>(0), vec3<i32>(F.smokeDims.xyz) - vec3<i32>(1));
+  return whoSmoke[u32(c.x + i32(F.smokeDims.x) * (c.y + i32(F.smokeDims.y) * c.z))];
+}
+fn waterWhoAt(p: vec3<f32>, rd: vec3<f32>) -> u32 {
+  if (F.shadowSpan.w < 0.5) { return 0u; }
+  let h = F.liqMin.w;
+  let n = vec3<i32>(round((F.liqMax.xyz - F.liqMin.xyz) / h));
+  let u = p / h * 0.9;
+  let off = vec3<f32>(vnoise(u.xz + vec2<f32>(u.y, 3.1)), vnoise(u.zy + vec2<f32>(7.7, u.x)), vnoise(u.yx + vec2<f32>(u.z, 13.3))) - vec3<f32>(0.5);
+  let c = vec3<i32>(floor((p + rd * h * 0.5 + off * h * 1.6 - F.liqMin.xyz) / h));
+  for (var k = 0; k < 9; k = k + 1) {
+    var d = vec3<i32>(0);
+    if (k >= 1 && k <= 6) { d[(k - 1) / 2] = 1 - 2 * ((k - 1) % 2); }
+    if (k >= 7) { d = vec3<i32>(round(rd * f32(k - 6))); }
+    let q = c + d;
+    if (any(q < vec3<i32>(0)) || any(q >= n)) { continue; }
+    let v = whoWater[u32(q.x + n.x * (q.y + n.y * q.z))];
+    if (v != 0u) { return v & 63u; }
+  }
+  return 0u;
 }
 
 fn vpAt(q: vec2<i32>) -> vec4<f32> {
@@ -1877,6 +2032,59 @@ fn closeShade(p: vec3<f32>, toward: vec3<f32>) -> vec3<f32> {
   let fine = F.shadowSpan.y;
   let dn = textureSampleLevel(smokeDye, linSamp, (p + toward * fine * 1.5 - F.smokeMin.xyz) / (F.smokeMax.xyz - F.smokeMin.xyz), 0.0);
   return exp(-(vec3<f32>(dn.a) + dn.rgb) * F.smokeMax.w * fine * 1.2);
+}
+
+fn smokeLook(w: u32, amount: f32, own: vec3<f32>, p: vec3<f32>, rd: vec3<f32>, len: f32, absorb: f32, fc: vec2<f32>, T: ptr<function, vec3<f32>>, L: ptr<function, vec3<f32>>) {
+  let shd = u32(FT[w].d.x + 0.5);
+  let tau = amount * absorb * len * FT[w].c.z;
+  var base = own;
+  if (FT[w].g.x >= 0.0) {
+    let pic = artOnSurface(w, p, normalize(-rd));
+    base = mix(base, pic.rgb, FT[w].g.z * pic.a);
+  }
+  let seen = amount * FT[w].c.z;
+  if (shd == 2u) {
+    let c = pickedCol(fluidColour(w, base, seen * 1.2));
+    let k = 1.0 - exp(-tau * 2.0 * FT[w].f.w);
+    *L = *L + *T * c * k;
+    *T = *T * mix(1.0, 1.0 - k, FT[w].d.w);
+  } else if (shd == 3u) {
+    let c = fluidColour(w, base, seen * 4.0);
+    *L = *L + *T * c * tau * FT[w].f.w * 2.5;
+    *T = *T * exp(-tau * 0.08 * FT[w].d.w);
+  } else {
+    let iso = 0.03 + FT[w].i.x * 0.3;
+    if (seen < iso) { return; }
+    let uvw = (p - F.smokeMin.xyz) / (F.smokeMax.xyz - F.smokeMin.xyz);
+    let lt = textureSampleLevel(smokeLight, linSamp, uvw, 0.0).rgb;
+    let e = F.smokeDims.w;
+    let at = (p - F.smokeMin.xyz);
+    let span = F.smokeMax.xyz - F.smokeMin.xyz;
+    let nd = vec3<f32>(smokeAmountAt((at + vec3<f32>(e, 0.0, 0.0)) / span) - smokeAmountAt((at - vec3<f32>(e, 0.0, 0.0)) / span),
+                       smokeAmountAt((at + vec3<f32>(0.0, e, 0.0)) / span) - smokeAmountAt((at - vec3<f32>(0.0, e, 0.0)) / span),
+                       smokeAmountAt((at + vec3<f32>(0.0, 0.0, e)) / span) - smokeAmountAt((at - vec3<f32>(0.0, 0.0, e)) / span));
+    var n = -rd;
+    if (length(nd) > 1e-5) { n = -normalize(nd); }
+    var out = vec3<f32>(0.0);
+    let v = -rd;
+    if (shd == 1u) {
+      let l = clamp(0.3 + 0.7 * max(dot(n, F.keyDir.xyz), 0.0) * (lt.r + lt.g + lt.b) / 3.0, 0.0, 1.0);
+      let bands = max(FT[w].h.x, 1.0);
+      let edge = FT[w].h.y * 0.6;
+      let inked = smoothstep(edge * 0.6, edge, max(dot(n, v), 0.0));
+      out = pickedCol(fluidColour(w, base, l) * (ceil(l * bands) / bands)) * mix(0.06, 1.0, inked);
+    } else {
+      let ndv = max(dot(n, v), 0.0);
+      let c = fluidColour(w, base, 0.5);
+      out = mirrored(p, reflect(rd, n)) * mix(c, vec3<f32>(1.0), pow(1.0 - ndv, 5.0)) + sunGlint(n, v, F.keyDir.xyz, F.keyCol.rgb);
+    }
+    *L = *L + *T * out * FT[w].d.w;
+    *T = *T * (1.0 - FT[w].d.w);
+  }
+}
+fn smokeAmountAt(uvw: vec3<f32>) -> f32 {
+  let d = textureSampleLevel(smokeDye, linSamp, uvw, 0.0);
+  return d.a + min(d.r, min(d.g, d.b));
 }
 
 struct SmokeSeen { light: vec3<f32>, through: vec3<f32> };
@@ -1928,7 +2136,21 @@ fn marchSmoke(ro: vec3<f32>, rd: vec3<f32>, tMin: f32, tMax: f32, fc: vec2<f32>,
     let amount = d.a + min(d.r, min(d.g, d.b));
     if (amount > 0.002) {
       let stop = vec3<f32>(d.a) + d.rgb;
-      let albedo = d.a / max(stop, vec3<f32>(1e-6));
+      var albedo = d.a / max(stop, vec3<f32>(1e-6));
+      var w = 0u;
+      if (F.shadowSpan.z > 0.5) {
+        w = smokeWhoAt(p);
+        if (w == 0u || FT[w].d.y > 0.5 || FT[w].d.x > 0.5) {
+          if (w != 0u && FT[w].d.y < 0.5) { smokeLook(w, amount, albedo, p, rd, len, absorb, fc, &T, &L); }
+          s0 = sEnd;
+          s1 = sEnd + clamp(0.06 / max(amount * absorb, 1e-3), stepLen, F.smokeDims.w);
+          continue;
+        }
+        if (FT[w].g.x >= 0.0) {
+          let pic = artOnSurface(w, p, normalize(-rd));
+          albedo = mix(albedo, pic.rgb, FT[w].g.z * pic.a);
+        }
+      }
       if (s0 >= nextLight) {
       nextLight = s0 + F.smokeDims.w * 0.75;
       let uvw = (p - bmin) / size;
@@ -1966,8 +2188,12 @@ fn marchSmoke(ro: vec3<f32>, rd: vec3<f32>, tMin: f32, tMax: f32, fc: vec2<f32>,
       }
       }
       let lightIn = lightRest + lightMain * closeShade(p, mainWay);
-      let a = exp(-stop * absorb * len);
+      let a = exp(-stop * absorb * len * FT[w].c.z);
       L = L + T * albedo * lightIn * (vec3<f32>(1.0) - a);
+      if (F.shadowSpan.z > 0.5 && FT[w].j.y > 0.0) {
+        let crust = 1.0 - FT[w].i.z * smoothstep(0.35, 0.7, vnoise(p.xy * 9.0 + vec2<f32>(p.z * 7.0, -F.eye.w * 0.6)));
+        L = L + T * fluidColour(w, albedo, 0.5) * FT[w].j.y * crust * (vec3<f32>(1.0) - a);
+      }
       T = T * a;
     }
     s0 = sEnd;
@@ -2066,7 +2292,7 @@ fn mirrored(wp: vec3<f32>, r: vec3<f32>) -> vec3<f32> {
   }
   return skyColor(r);
 }
-fn liquidSurface(px: vec2<i32>, fc: vec2<f32>, vp: vec3<f32>, rd: vec3<f32>, tScene: f32, G: NearGlass) -> vec3<f32> {
+fn liquidSurface(px: vec2<i32>, fc: vec2<f32>, vp: vec3<f32>, rd: vec3<f32>, tScene: f32, G: NearGlass, w: u32) -> vec3<f32> {
   let wp = F.eye.xyz + rd * length(vp);
   let v = -rd;
   let uv = fc * F.screen.zw;
@@ -2099,9 +2325,13 @@ fn liquidSurface(px: vec2<i32>, fc: vec2<f32>, vp: vec3<f32>, rd: vec3<f32>, tSc
   if (lean < 0.04) { nw = normalize(nw + v * (max(-lean, 0.04) - lean)); }
   var dye = th.rgb / max(th.a, 1e-4);
   var foam = 0.0;
-  if (smoothLook) { dye = th.rgb; foam = th.a * F.waterMore.x; }
+  if (smoothLook) { dye = th.rgb; foam = th.a * FT[w].c.x; }
+  if (FT[w].g.x >= 0.0) {
+    let pic = artOnSurface(w, wp, nw);
+    dye = mix(dye, -log(max(pic.rgb, vec3<f32>(0.02))), FT[w].g.z * pic.a);
+  }
   let base = exp(-dye);
-  let clarity = F.liquid.z;
+  let clarity = FT[w].b.w;
 
   let ndv = max(dot(nw, v), 0.0);
   let fres = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
@@ -2155,7 +2385,83 @@ fn liquidSurface(px: vec2<i32>, fc: vec2<f32>, vp: vec3<f32>, rd: vec3<f32>, tSc
     let f = smoothstep(1.0 - a * 1.1, 1.45 - a * 0.8, pat) * (0.25 + 0.75 * a);
     water = mix(water, shade(wp, nw, vec3<f32>(0.93), 0.0, 0.85, 1), f * 0.92);
   }
+  if (FT[w].j.y > 0.0) {
+    let t = F.eye.w;
+    let crust = 1.0 - FT[w].i.z * smoothstep(0.35, 0.7, vnoise(wp.xz * 9.0 + vec2<f32>(wp.y * 7.0, -t * 0.6)) * 0.7 + vnoise(wp.zx * 21.0 + vec2<f32>(t * 0.3, wp.y * 11.0)) * 0.3);
+    water = water * mix(1.0, 0.25, 1.0 - crust) + fluidColour(w, base, 0.5) * FT[w].j.y * crust;
+  }
+  let shd = u32(FT[w].d.x + 0.5);
+  if (shd > 0u) { water = waterLook(w, shd, wp, nw, rd, depthM, base, straightSeen); }
   return mix(straightSeen, water, cover);
+}
+
+fn waterLook(w: u32, shd: u32, wp: vec3<f32>, nw: vec3<f32>, rd: vec3<f32>, depthM: f32, own: vec3<f32>, behind: vec3<f32>) -> vec3<f32> {
+  let v = -rd;
+  let ndv = max(dot(nw, v), 0.0);
+  let op = FT[w].d.w;
+  if (shd == 1u) {
+    let sh = shadowAt(wp, nw, 1);
+    let l = clamp(0.28 + 0.72 * max(dot(nw, F.keyDir.xyz), 0.0) * sh, 0.0, 1.0);
+    let bands = max(FT[w].h.x, 1.0);
+    let c = fluidColour(w, own, l);
+    let flat2 = pickedCol(c * (ceil(l * bands) / bands));
+    let edge = FT[w].h.y * 0.55;
+    let inked = smoothstep(edge * 0.55, edge, ndv);
+    return mix(behind, flat2 * mix(0.06, 1.0, inked), op);
+  }
+  if (shd == 2u || shd == 3u) {
+    let k = FT[w].f.w;
+    let thick2 = 1.0 - exp(-depthM * select(3.0, 1.5, shd == 2u) * k);
+    let rim = pow(1.0 - ndv, 2.5) * FT[w].h.y;
+    let c = fluidColour(w, own, thick2 * thick2 * thick2 + rim);
+    if (shd == 2u) { return mix(behind, pickedCol(c), op * (0.7 + 0.3 * thick2)) + pickedCol(FT[w].f.rgb) * rim * 0.5; }
+    return behind + c * (thick2 + rim) * k * 2.0;
+  }
+  let c = fluidColour(w, own, 0.5);
+  let f = c + (vec3<f32>(1.0) - c) * pow(1.0 - ndv, 5.0);
+  let r = reflect(rd, nw);
+  var spec = sunGlint(nw, v, F.keyDir.xyz, F.keyCol.rgb) * shadowAt(wp, nw, 1) + sunGlint(nw, v, F.fillDir.xyz, F.fillCol.rgb) + sunGlint(nw, v, F.rimDir.xyz, F.rimCol.rgb);
+  for (var i = 0; i < i32(F.lightN.x); i = i + 1) { spec = spec + mirrorOfLight(F.lights[i], wp, r, 0.02) * localShadowAt(F.lights[i], wp, nw, 1); }
+  return mix(behind, mirrored(wp, r) * f + spec, op);
+}
+
+fn cellForms(col0: vec3<f32>, fc: vec2<f32>, near: f32) -> vec3<f32> {
+  var col = col0;
+  let n = i32(FT[${FLUID_ROWS - 1}].e.x);
+  for (var k = 0; k < n; k = k + 1) {
+    let w = u32(FT[${FLUID_ROWS - 1}].a[k]);
+    let size = FT[${FLUID_ROWS - 1}].b[k];
+    let q = floor(fc / size);
+    let cols = ceil(F.screen.x / size);
+    let at = u32(FT[${FLUID_ROWS - 1}].c[k]) + 2u * u32(q.x + q.y * cols);
+    let A = cells[at];
+    let B = cells[at + 1u];
+    if (A.a <= 0.004 || B.x > near) { continue; }
+    let f = fc / size - q;
+    let form = u32(FT[w].d.y + 0.5);
+    let value = clamp(B.y, 0.0, 1.0);
+    if (FT[w].k.w > 0.0) { col = mix(col, pickedCol(FT[w].k.rgb), FT[w].k.w * A.a); }
+    var mask = 1.0;
+    if (form == 3u) {
+      let count = FT[w].h.w;
+      if (count < 0.5) { continue; }
+      var index = floor(value * count * 0.999);
+      if (FT[w].j.x > 0.5) { index = floor(hash21(q + floor(F.eye.w * 3.0 * hash21(q)) * 0.37) * count * 0.999); }
+      mask = glyphAt(u32(FT[w].h.z + index), f);
+      if (FT[w].j.x > 0.5) { mask = mask * smoothstep(0.02, 0.2, value); }
+    } else if (form == 4u) {
+      let r = sqrt(value) * 0.62;
+      let aa = 1.2 / size;
+      mask = 1.0 - smoothstep(r - aa, r + aa, length(f - vec2<f32>(0.5)));
+    } else if (form == 6u) {
+      let aa = 1.2 / size;
+      mask = 1.0 - smoothstep(value * 0.5 - aa, value * 0.5 + aa, abs(f.y - 0.5));
+    } else {
+      mask = select(value, value * 0.8, f.x < 0.06 || f.y < 0.06);
+    }
+    col = mix(col, A.rgb, mask * A.a * FT[w].d.w);
+  }
+  return col;
 }
 
 fn rain(uv: vec2<f32>, c: vec3<f32>) -> vec3<f32> {
@@ -2205,9 +2511,12 @@ fn finalLight(fc4: vec4<f32>) -> vec3<f32> {
       let vp = viewPos(fc, ld);
       let dist = length(vp);
       if (dist < tScene + 0.02) {
-        col = liquidSurface(px, fc, vp, rd, tScene, G);
-        tMax = dist;
-        if (G.at >= dist) { G = NearGlass(1e9, vec3<f32>(0.0), vec3<f32>(1.0)); }
+        let w = waterWhoAt(F.eye.xyz + rd * dist, rd);
+        if (FT[w].c.w < 1.5) {
+          col = liquidSurface(px, fc, vp, rd, tScene, G, w);
+          tMax = dist;
+          if (G.at >= dist) { G = NearGlass(1e9, vec3<f32>(0.0), vec3<f32>(1.0)); }
+        }
       }
     }
   }
@@ -2217,6 +2526,7 @@ fn finalLight(fc4: vec4<f32>) -> vec3<f32> {
   } else {
     col = col * G.through + G.light;
   }
+  if (FT[${FLUID_ROWS - 1}].e.x > 0.5) { col = cellForms(col, fc, tMax); }
   if (F.env.z > 0.0) { col = rain(uv, col); }
   return col * F.env.y;
 }

@@ -14,7 +14,7 @@ export function seenId(id) { nextId = Math.max(nextId, id + 1); }
 const count = {};
 export function nameFor(label) { count[label] = (count[label] || 0) + 1; return `${label} ${count[label]}`; }
 
-export const OBJECT_OPTIONS = ['hidden', 'noShadow', 'blocksFluid', 'noGravity', 'linDamp', 'angDamp', 'massKg', 'bounce', 'grip'];
+export const OBJECT_OPTIONS = ['hidden', 'noShadow', 'blocksFluid', 'noGravity', 'linDamp', 'angDamp', 'massKg', 'bounce', 'grip', 'soft'];
 export const optionsOf = o => Object.fromEntries(OBJECT_OPTIONS.filter(k => o[k] !== undefined && (k === 'blocksFluid' || (o[k] !== false && o[k] !== 0))).map(k => [k, o[k]]));
 
 export function sourceLabel(e) {
@@ -60,18 +60,19 @@ export class Scene {
     if (tex) o.tex = JSON.parse(JSON.stringify(tex));
     if (decals && decals.length) o.decals = JSON.parse(JSON.stringify(decals));
     if (partLooks) o.partLooks = JSON.parse(JSON.stringify(partLooks));
+    if (o.soft) o.soft = JSON.parse(JSON.stringify(o.soft));
     if (id) seenId(id);
     this.objects.push(o);
     return o;
   }
 
   addEmitter({ type = 'smoke', pos = [0, 0.3, 0], radius = 0.25, color = [0.9, 0.9, 0.9], dir = [0, 1, 0], speed = 1, rate = 1, on = true, name, id,
-    heat = 1, pulse = null, sink = false, attach = null, hidden = false }) {
+    heat = 1, pulse = null, sink = false, attach = null, hidden = false, own = null, look = null }) {
     if (this.emitters.length >= MAX_EMITTERS) return null;
     const e = { id: id || takeId(), kind: 'emitter', type, name: name || nameFor(sourceLabel({ type, sink })),
       pos: [...pos], radius, color: [...color], dir: [...dir], speed, rate, on, heat, pulse: pulse ? { ...pulse } : null, sink: !!sink,
       attach: attach && attach.to != null ? { to: attach.to, ...(Number.isInteger(attach.part) ? { part: attach.part } : {}) } : null,
-      vel: [0, 0, 0], last: [...pos], ...(hidden ? { hidden: true } : {}) };
+      vel: [0, 0, 0], last: [...pos], ...(hidden ? { hidden: true } : {}), ...(own ? { own: { ...own } } : {}), ...(look ? { look: { ...look } } : {}) };
     if (id) seenId(id);
     this.emitters.push(e);
     return e;
@@ -119,8 +120,19 @@ export class Scene {
   }
 
   meshOf(o) { return o.model ? this.models.get(o.model).mesh : unitMesh(o.shape); }
+  softBodyOf(o) { return this.softWorld && o.soft && o.soft.on !== false ? this.softWorld.bodies.get(o.id) || null : null; }
 
   surfaceHit(ray, o) {
+    const sb = this.softBodyOf(o);
+    if (sb) {
+      const h = sb.rayHit(ray.origin, ray.dir);
+      if (!h) return null;
+      const s = o.size, D = sb.drawn, c = h.corner * 3;
+      let dir = normalize([D.ln[c] / s[0] * s[0], D.ln[c + 1], D.ln[c + 2]]);
+      const ax = eulerAxes(o.rot), toEye = [-dot(ray.dir, ax[0]), -dot(ray.dir, ax[1]), -dot(ray.dir, ax[2])];
+      if (dot(dir, toEye) < 0) dir = dir.map(v => -v);
+      return { at: h.local.map((v, k) => v / s[k]), dir, part: h.part, t: h.t, point: h.point };
+    }
     const mesh = this.meshOf(o), ax = eulerAxes(o.rot), s = o.size;
     const lo = toLocal(ray.origin, o.pos, ax).map((v, k) => v / s[k]);
     const ld = [dot(ray.dir, ax[0]) / s[0], dot(ray.dir, ax[1]) / s[1], dot(ray.dir, ax[2]) / s[2]];
@@ -156,7 +168,8 @@ export class Scene {
     }
     for (const o of this.objects) {
       if (o.hidden) continue;
-      const t = rayObject(ray, o, this.meshOf(o));
+      const sb = this.softBodyOf(o);
+      const t = sb ? (sb.rayHit(ray.origin, ray.dir) || { t: null }).t : rayObject(ray, o, this.meshOf(o));
       if (t !== null && (!best || t < best.t)) best = { item: o, t };
     }
     if (!best && ground && ray.dir[1] < -1e-4) best = { item: null, t: -ray.origin[1] / ray.dir[1] };

@@ -7,6 +7,8 @@ import { isImageFile } from './engine/images.js';
 import { lookData } from './engine/material.js';
 import { hexToRgb } from './engine/settings.js';
 import { MOVES_BY_DEFAULT } from './engine/physics.js';
+import { softOn } from './engine/softbody.js';
+import { setSoft } from './engine/softpresets.js';
 import { MAX_OBJECTS, MAX_EMITTERS, MAX_MARKS, MAX_LIGHTS, LIGHT_KINDS, optionsOf } from './engine/scene.js';
 import { ATLAS_SLOTS } from './engine/sdf.wgsl.js';
 import { ASSETS, ASSET_GROUPS, ASSET_BY_ID } from './engine/assets.js';
@@ -106,7 +108,7 @@ function tick() {
   paintStatus();
   if (app.panels.fluids) app.panels.fluids.tick();
   const sel = app.vp.scene.selected;
-  if (app.tab === 'scene' && sel && sel.kind === 'object' && sel.moves) app.panels.scene.paintLight();
+  if (app.tab === 'scene' && sel && sel.kind === 'object' && (sel.moves || softOn(sel))) app.panels.scene.paintLight();
   if (app.tab === 'scene' && app.waitingBake && app.vp.scene.selected) {
     const m = app.vp.scene.selected.model && app.vp.scene.models.get(app.vp.scene.selected.model);
     if (m && m.ready) { app.waitingBake = false; app.panels.scene.paint(); }
@@ -122,7 +124,7 @@ async function save() {
 
 app.commit = () => {
   for (const sel of app.vp.movers()) {
-    if (sel.kind !== 'object') continue;
+    if (sel.kind !== 'object' || softOn(sel)) continue;
     const m = motionOn(sel.motion) ? motionAt(sel, app.vp.simTime) : null;
     sel.home = m ? { pos: sel.pos.map((v, k) => v - m.off[k]), rot: [sel.rot[0], sel.rot[1] - m.turn, sel.rot[2]] }
       : { pos: [...sel.pos], rot: [...sel.rot] };
@@ -310,7 +312,7 @@ app.confirmButton = (text, action, { cls = 'btn danger', title } = {}) => {
 };
 
 
-const ADD_SHAPES = ['box', 'ball', 'column', 'cone', 'ring', 'ramp', 'arch', 'stairs', 'wall', 'slab'];
+const ADD_SHAPES = ['box', 'ball', 'column', 'cone', 'ring', 'ramp', 'arch', 'stairs', 'wall', 'slab', 'plane'];
 const FLYOUTS = new Set(['shapes', 'objects', 'marks', 'smoke', 'liquid', 'lights']);
 
 function buildTools() {
@@ -496,6 +498,7 @@ function paintTools() {
 
 const SOURCE_KINDS = new Set(['smoke', 'liquid', 'drain', 'extractor']);
 
+const PLANE_LIFT = 1;
 function placerFor(kind) {
   const vp = app.vp, S = vp.settings;
   const asset = kind.startsWith('asset:') ? ASSET_BY_ID[kind.slice(6)] : null;
@@ -520,13 +523,13 @@ function placerFor(kind) {
     } else {
       made = vp.scene.addObject({ shape: kind, pos: [p[0], 0, p[2]], color: hexToRgb(S.objectColor),
         moves: MOVES_BY_DEFAULT.has(kind), material: kind === 'ball' ? 'rubber' : 'wood' });
-      if (made) { vp.dropToGround(made, p[1]); made.home = { pos: [...made.pos], rot: [...made.rot] }; }
+      if (made) { vp.dropToGround(made, p[1] + (kind === 'plane' ? PLANE_LIFT : 0)); made.home = { pos: [...made.pos], rot: [...made.rot] }; }
     }
     if (!made) toast(SOURCE_KINDS.has(kind) ? `A scene can hold ${MAX_EMITTERS} sources, drains and extractors; delete one first.`
       : kind.startsWith('light:') ? `A scene can hold ${MAX_LIGHTS} lights; delete one first.` : `A scene can hold ${MAX_OBJECTS} objects; delete one first.`, true);
     return made;
   };
-  place.lift = asset ? asset.lift || 0 : kind === 'extractor' ? 0.6 : 0;
+  place.lift = asset ? asset.lift || 0 : kind === 'extractor' ? 0.6 : kind === 'plane' ? PLANE_LIFT : 0;
   return place;
 }
 
@@ -651,6 +654,7 @@ function contextMenu(item, x, y) {
     ...(!many && (item.kind !== 'mark' || item.pos) ? [row('focus', 'Focus', 'F', () => vp.frameSelected())] : []),
     row(allHidden ? 'eye' : 'eyeOff', (allHidden ? 'Show' : 'Hide') + n, 'H', () => app.toggleHidden(items)),
     ...(items.some(i => i.kind === 'object') ? [row('move', 'Put on the ground' + n, 'End', () => app.groundAll(items))] : []),
+    ...(items.every(i => i.kind === 'object' && !vp.scene.emitters.some(e => e.attach && e.attach.to === i.id)) ? [row('soft', items.every(softOn) ? 'Make solid' + n : 'Make soft' + n, '', () => app.toggleSoft(items))] : []),
     row('objects', 'Select all like this', '', () => app.selectLike(item)),
     row('trash', 'Delete' + n, 'Del', () => app.removeAll(items)));
   menu.hidden = false;
@@ -676,6 +680,13 @@ app.groundAll = items => {
     app.vp.dropToGround(o);
     if (o.home) o.home.pos[1] += o.pos[1] - y;
   }
+  app.vp.emit('change');
+  app.commit();
+};
+app.toggleSoft = items => {
+  const on = !items.every(softOn);
+  for (const o of items) setSoft(o, on);
+  repaintPanel();
   app.vp.emit('change');
   app.commit();
 };
@@ -721,7 +732,7 @@ function copyOf(item) {
   } else if (item.kind === 'emitter') {
     copy = vp.scene.addEmitter({ type: item.type, pos: item.pos.map((v, k) => v + off[k]), radius: item.radius, color: [...item.color],
       dir: [...item.dir], speed: item.speed, rate: item.rate, on: item.on, heat: item.heat ?? 1, pulse: item.pulse, name: item.name + ' copy',
-      sink: !!item.sink, attach: item.attach ? { to: item.attach.to } : null });
+      sink: !!item.sink, attach: item.attach ? { to: item.attach.to } : null, own: item.own || null, look: item.look || null });
   } else if (item.kind === 'light') {
     const { id, kind, name, ...rest } = JSON.parse(JSON.stringify(item));
     copy = vp.scene.addLight({ ...rest, pos: item.pos.map((v, k) => v + off[k]), name: item.name + ' copy' });
@@ -739,7 +750,7 @@ function copyOf(item) {
     let left = 0;
     for (const e of parts) {
       const c = vp.scene.addEmitter({ type: e.type, pos: e.pos.map((v, k) => v + off[k]), radius: e.radius, color: [...e.color], dir: [...e.dir],
-        speed: e.speed, rate: e.rate, on: e.on, heat: e.heat ?? 1, pulse: e.pulse, sink: !!e.sink, attach: { to: copy.id, part: e.attach.part }, name: e.name + ' copy' });
+        speed: e.speed, rate: e.rate, on: e.on, heat: e.heat ?? 1, pulse: e.pulse, sink: !!e.sink, attach: { to: copy.id, part: e.attach.part }, name: e.name + ' copy', own: e.own || null, look: e.look || null });
       if (!c) left++;
     }
     if (left) toast(`Copied without ${left > 1 ? left + ' of its parts' : 'one of its parts'}: a scene holds ${MAX_EMITTERS} sources.`, true);
@@ -936,9 +947,11 @@ function paintInfo() {
         [el('span', {}, el('kbd', {}, 'Ctrl'), ' ', el('kbd', {}, 'S')), 'save the scene as a file'], [el('span', {}, el('kbd', {}, 'Ctrl'), ' ', el('kbd', {}, 'O')), 'open a scene file']]
         .map(([a, b]) => el('tr', {}, el('td', {}, a), el('td', {}, b)))),
     el('h3', {}, 'The start scene'),
-    el('p', {}, 'The app opens on a clear basin turned over on a pale floor in the dark: two soft colours of smoke rise under it, two pours land on it and spread across the floor to a drain, with one area light and a film look. It opens empty and fills in about 20 seconds. New brings it back.'),
+    el('p', {}, 'The app opens on a clear basin turned over on a light grey floor in the dark, with a ball of soft jelly resting on it: two soft colours of smoke rise under it, two pours land on it, sometimes push the ball off, and spread across the floor to a drain, with one area light, seen close through a wide lens with the Ricoh GR HDF look. It opens empty and fills in about 20 seconds. New brings it back.'),
     el('h3', {}, 'Colour and the look of water'),
     el('p', {}, 'Each source has its own colour (Scene tab, with the source selected). Colours mix as dye does: water colours spread where the water is stirred, so yellow and blue make green, and smoke tints what is behind it and its shadow. The Fluids tab sets how the liquid is drawn: Smooth (one surface made from all the particles), Surface (the particles drawn as balls, smoothed together) or Particles.'),
+    el('h3', {}, 'Each fluid its own'),
+    el('p', {}, 'Each source is a fluid of its own. Select one: in the Scene tab, This fluid holds its own settings over the whole scene\'s (the arrow goes back to them), and Look of this fluid says how it is drawn. Pick a ready-made look, or choose what it is Made of (itself, blocks, balls, text, dots, pixels or lines) and its Shade (real, flat, X-ray, glow or metal) in any pair, and put a picture on it. Blocks and balls are real things in the scene: they cast shadows and water mirrors them. The Fluids tab lists every fluid. Accuracy, Speed, Gravity, Liquid look and Caustics stay the whole scene\'s. A scene can draw four fluids as text, dots, pixels or lines, and show eight pictures on fluids.'),
     el('h3', {}, 'Wind and rain'),
     el('p', {}, 'The Wind tab: wind carries the smoke, ripples and pushes the water, blows spray and slants the rain, with gusts and small swirls; its arrow shows in the corner of the view. Rain falls across the view and makes shiny ground ripple; it adds no water.'),
     el('h3', {}, 'Simulation box'),
@@ -958,7 +971,7 @@ function paintInfo() {
     el('h3', {}, 'Marks'),
     el('p', {}, 'Live data and drawn elements over the view, in the Marks tool: text, a timer, a counter, a panel of live numbers, a legend of the sources, labels that follow things, numbered tracking boxes, lines between things, wire grids and outlines. Text can show live numbers in braces, such as {timecode} or {height}. Marks stay sharp over the filters.'),
     el('h3', {}, 'Filters'),
-    el('p', {}, 'The Filters tab works on the finished picture like a photo editor. Film looks, each after one of Fujifilm\'s film simulations (named in its tooltip; made by hand, not measured against a camera), with highlights, shadows, colour, warmth, clarity, sharpen and grain over them. Diffusion and bloom spread light from bright parts, as the filter in the Ricoh GR III HDF does: a lamp spreads further than a white wall. And colour, tint, posterize, scan lines, vignette, soften, colour split, ink lines and a sharp band for a miniature look. Saved with the scene.'),
+    el('p', {}, 'The Filters tab works on the finished picture, in two steps switched at its top: the camera takes the picture, the medium shows it. Each starts with eight looks as small pictures of your scene (None first): click one to start from it, with its Amount and Reset to take your changes off; every row below shows what is drawn, and whatever you change sits over the look with an arrow to give it back. Camera: Kodak Portra, Classic Chrome, Fuji Velvia, Ricoh GR HDF, Fuji Acros, Cross process, CineStill 800T and War Optics (a photo filter by the same maker), made by hand from what is published of each, not measured against a camera; a look\'s tooltip says how to get the looks it took in. Auto Adjust gives a new variation on each press. Then Light (contrast, highlights, shadows, fade, saturation, temperature, tint, colour grading, clarity), Detail (sharpening, grain, noise) and Optics (focal length, depth of field and its focus distance, distortion, aberration, vignette, lens flare, diffuse glow, tilt-shift), named as Photoshop names them. Medium: Photocopier, CRT monitor, Medical X-ray, Old radar, Woodcut, Risograph, PlayStation and Game Boy; its rows are the stages it uses (mosaic and cells, levels, colours, print and its paper border, copier, screen, signal), and Show every setting adds any stage. Effects set in pixels keep their size against the picture in any window. Saved with the scene.'),
     el('h3', {}, 'Your own models'),
     el('p', {}, `GLB or glTF, FBX, USDZ (or USD, USDC, USDA), OBJ with its MTL, or STL. Use the Model tool or drop the file on the window; pick an OBJ or FBX together with its pictures. Each part keeps its material and pictures. Compressed glTF, and skinning and animation in any file, are not read. Up to ${ATLAS_SLOTS} different models (library objects count) and ${MAX_OBJECTS} objects in a scene.`),
     el('h3', {}, 'The panels'),

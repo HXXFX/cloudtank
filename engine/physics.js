@@ -16,6 +16,7 @@ export const MOVES_BY_DEFAULT = new Set(['box', 'ball', 'cone', 'ring']);
 let G = 9.81;
 export function setGravity(v) { G = v; }
 export const blocksFluid = o => o.blocksFluid ?? (o.collides !== false);
+const softThing = o => !!(o.soft && o.soft.on !== false);
 const WATER = 1000, AIR = 1.2;
 const ITER = 12;
 const SLOP = 0.001, BETA = 0.25, MARGIN = 0.01;
@@ -119,7 +120,7 @@ class Body {
     this.sampleArea = surfaceArea(scene.meshOf(o), s) / Math.max(this.samples.length, 1);
   }
 
-  get dynamic() { return !!this.o.moves && !this.o.held; }
+  get dynamic() { return !!this.o.moves && !this.o.held && !softThing(this.o); }
   get free() { return this.dynamic && !this.asleep; }
   get invMass() { return this.free ? 1 / this.mass : 0; }
 
@@ -216,11 +217,12 @@ export class Physics {
     for (const c of this.bodies.values()) if (c !== b && len(sub(c.pos, b.pos)) < c.radius + b.radius + 0.1) c.wake();
   }
 
-  step(scene, dt, steps, wind) {
+  step(scene, dt, steps, wind, afterStep = null) {
     const t0 = performance.now();
     this.scene = scene;
     this.sync(scene);
     const all = [...this.bodies.values()];
+    this.lastAll = all;
     if (wind) {
       for (const b of all) {
         if (b.asleep && b.dynamic && blocksFluid(b.o) && len(this.windForce(b, wind).f) > 0.05 * G * b.mass) b.wake();
@@ -228,10 +230,18 @@ export class Physics {
     }
     const h = dt / steps;
     let contacts = 0;
-    for (let s = 0; s < steps; s++) contacts = this.substep(all, h, wind);
-    for (const b of all) {
+    for (let s = 0; s < steps; s++) {
+      contacts = this.substep(all, h, wind);
+      if (afterStep) afterStep(h);
+    }
+    this.writeBack();
+    this.stats = { bodies: all.length, contacts, ms: performance.now() - t0, awake: all.filter(b => b.free).length };
+  }
+
+  writeBack() {
+    for (const b of this.lastAll || []) {
       const o = b.o;
-      if (!o.moves || o.held) continue;
+      if (!o.moves || o.held || softThing(o)) continue;
       o.pos = [...b.pos];
       o.rot = eulerOf(b.ax);
       o.vel = [...b.v];
@@ -239,7 +249,6 @@ export class Physics {
       o.last = [...o.pos];
       b.written = { pos: [...o.pos], rot: [...o.rot] };
     }
-    this.stats = { bodies: all.length, contacts, ms: performance.now() - t0, awake: all.filter(b => b.free).length };
   }
 
   substep(all, h, wind) {
@@ -405,7 +414,7 @@ export class Physics {
   findContacts(all) {
     const cs = [];
     this.placePoints(all);
-    const alive = all.filter(b => b.o.collides !== false);
+    const alive = all.filter(b => b.o.collides !== false && !softThing(b.o));
     for (let i = 0; i < alive.length; i++) {
       const A = alive[i];
       if (A.free && A.pos[1] - A.radius < MARGIN) this.groundContacts(A, cs);

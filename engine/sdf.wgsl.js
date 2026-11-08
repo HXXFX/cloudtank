@@ -3,6 +3,8 @@ import { ARCH, STEPS } from './shapes.js';
 export const MAX_OBJECTS = 64;
 export const OBJ_FLOATS = 32;
 export const MAX_EMITTERS = 32;
+export const FLUID_FLOATS = 44;
+export const FLUID_ROWS = MAX_EMITTERS + 2;
 export const ATLAS_RES = 64;
 export const ATLAS_SLOTS = 32;
 export const ATLAS_PAD = 1.15;
@@ -24,6 +26,20 @@ struct Emitter {
   b: vec4<f32>,
   c: vec4<f32>,
   d: vec4<f32>,
+};
+
+struct Fluid {
+  a: vec4<f32>,
+  b: vec4<f32>,
+  c: vec4<f32>,
+  d: vec4<f32>,
+  e: vec4<f32>,
+  f: vec4<f32>,
+  g: vec4<f32>,
+  h: vec4<f32>,
+  i: vec4<f32>,
+  j: vec4<f32>,
+  k: vec4<f32>,
 };
 
 fn localOf(p: vec3<f32>, o: Obj) -> vec3<f32> {
@@ -194,4 +210,5 @@ export const SOLVER_GROUP0 = (paramsType) =>  `
 @group(0) @binding(2) var<uniform> O: array<Obj, ${MAX_OBJECTS}>;
 @group(0) @binding(3) var atlas: texture_3d<f32>;
 @group(0) @binding(4) var atlasSamp: sampler;
+@group(0) @binding(5) var<uniform> FT: array<Fluid, ${FLUID_ROWS}>;
 `;

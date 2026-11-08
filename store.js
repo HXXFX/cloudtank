@@ -21,6 +21,7 @@ export function sceneData(vp, { forFile }) {
   const usedImages = new Set();
   imagesOf(vp.look.ground, usedImages);
   for (const o of s.objects) { imagesOf(o, usedImages); for (const p of o.partLooks || []) imagesOf(p, usedImages); }
+  for (const e of s.emitters) if (e.look && e.look.picture) usedImages.add(e.look.picture);
   const images = [...usedImages].map(id => s.images.get(id)).filter(Boolean).map(m => ({ id: m.id, name: m.name, data: forFile ? m.dataUrl : m.blob }));
   return {
     format: FORMAT, version: VERSION, kits: 2, frosted: 1, savedAt: new Date().toISOString(),
@@ -35,7 +36,7 @@ export function sceneData(vp, { forFile }) {
 export async function openScene(vp, data) {
   if (!data || data.format !== FORMAT) throw new Error('This is not a Cloudtank scene file.');
   vp.settings = { ...vp.settings, ...data.settings };
-  vp.look = { ...vp.look, post: null, ...copy(data.look) };
+  vp.look = { ...vp.look, post: null, media: null, ...copy(data.look) };
   const want = data.region ? { region: data.region, fineness: data.fineness }
     : { area: data.area || 4, detail: data.detail || 'normal' };
   await vp.setSimulation(want);

@@ -8,7 +8,9 @@ import { hexToRgb, rgbToHex, SETTINGS as FLUID_SETTINGS } from '../engine/settin
 import { ASSET_BY_ID } from '../engine/assets.js';
 import { categoriesFor, category, filterRows, groundCategories } from './details.js';
 import { MARK_TYPES, LIVE, COUNTS, motionOn } from '../engine/marks.js';
-import { FILTER_PRESETS, POST_DEFAULTS, FILM_LOOKS, DIFFUSIONS } from '../engine/post.wgsl.js';
+import { POST_DEFAULTS, FILM_LOOKS, DIFFUSIONS, CELL_SHAPES, DITHERS, autoAdjust, LOOKS, LOOK_LIST, RECIPES, effectivePost, upgradePost } from '../engine/post.wgsl.js';
+import { MEDIA_DEFAULTS, MEDIA_PRESETS, MEDIA_LIST, effectiveMedia, upgradeMedia } from '../engine/media.wgsl.js';
+import { LOOK_PRESETS } from '../engine/fluids.js';
 
 const DEG = 180 / Math.PI;
 const fmtN = n => Math.round(n).toLocaleString('en-US');
@@ -368,6 +370,8 @@ export function fluidsPanel(app) {
     region,
     category('f-time', 'Time and gravity', [row('speed'), row('gravity'),
       el('div', { class: 'btns' }, button('Empty the fluids', () => vp.resetFluids(), { title: 'Removes all smoke and liquid; keeps everything else.' }))]),
+    el('p', { class: 'note' }, 'For the whole scene. Each source can have its own: click one, and change it under This fluid, with its look above that.'),
+    fluidList(app),
     category('f-smoke', 'Smoke', [row('smokeAmount'), row('fade'), row('cooling'), row('rise'), row('smokeWeight'), row('swirl'), row('smokeDetail'), row('smokeSteps'), row('smokeOpacity')]),
     category('f-liquid', 'Liquid', [row('flow'), row('splash'), row('liquidSteps'), row('clarity'), row('foam'), row('caustics'),
       choice({ label: 'Look', wrap: true, options: [['smooth', 'Smooth'], ['surface', 'Surface'], ['dots', 'Particles']],
@@ -377,10 +381,27 @@ export function fluidsPanel(app) {
   root.paint = () => repaintAll(root);
   root.tick = () => {
     region.check();
+    root.querySelector('.fluidlist').paint();
     const f = vp.flip;
     live.textContent = f ? `${fmtN(f.live)} of ${fmtN(f.maxParticles)} particles` + (f.full ? '. Full: the oldest are reused at the sources.' : '.') : '';
   };
   return root;
+}
+
+function fluidList(app) {
+  const vp = app.vp, box = el('div', { class: 'fluidlist' });
+  let shown = '';
+  box.paint = () => {
+    const list = vp.scene.emitters.filter(e => !e.sink);
+    const key = JSON.stringify(list.map(e => [e.id, e.name, e.color, e.look ? e.look.preset : '', e.own ? 1 : 0, vp.scene.selected === e]));
+    if (key === shown) return;
+    shown = key;
+    box.replaceChildren(...list.map(e => el('button', { type: 'button', class: 'fluidrow' + (vp.scene.selected === e ? ' on' : ''), title: 'Its settings and look', onclick: () => { vp.select(e); document.querySelector('[data-tab="scene"]').click(); } },
+      el('i', { style: `background:${rgbToHex(e.color)}` }), el('span', {}, e.name), el('small', {}, [e.look ? (LOOK_PRESETS[e.look.preset] || { label: 'Own look' }).label : 'Photo real', e.own ? 'own settings' : ''].filter(Boolean).join(', ')))));
+    box.hidden = !list.length;
+  };
+  box.paint();
+  return box;
 }
 
 function regionSection(app) {
@@ -575,85 +596,305 @@ export function worldPanel(app) {
 }
 
 
+const MOVED = ['resolution', 'cellShape', 'dither', 'posterize', 'ink', 'border', 'borderWidth', 'keyline'];
+const without = (o, keys) => { if (!o) return null; const c = { ...o }; for (const k of keys) delete c[k]; return c; };
+const only = (o, keys) => { const c = {}; if (o) for (const k of keys) if (o[k] !== undefined) c[k] = o[k]; return c; };
+
+function lookTiles({ items, get, set }) {
+  const box = el('div', { class: 'lk-grid', role: 'listbox' });
+  const tiles = items.map(it => {
+    const canvas = el('canvas', { width: 192, height: 119, 'aria-hidden': 'true' });
+    const pic = el('div', { class: it.key === 'none' ? 'pic off' : 'pic' }, canvas);
+    const b = el('button', { type: 'button', class: 'lk', role: 'option', title: it.tip || it.says || it.name }, pic, el('span', { class: 'nm' }, it.name));
+    b.dataset.key = it.key;
+    b.addEventListener('click', () => set(it.key));
+    box.append(b);
+    return { b, canvas, it };
+  });
+  box.paint = () => { const v = get(); for (const t of tiles) { t.b.classList.toggle('on', t.it.key === v); t.b.setAttribute('aria-selected', t.it.key === v ? 'true' : 'false'); } };
+  box.tiles = tiles;
+  box.paint();
+  return box;
+}
+function lookLine(p, items, L, older) {
+  p.replaceChildren();
+  const it = items.find(x => x.key === L);
+  if (it && L !== 'none') p.append(el('b', {}, it.name), ': ' + it.says);
+  else if (L !== 'none' && older) p.append(el('b', {}, older), ': from an earlier list, kept as this scene had it.');
+  p.hidden = !p.childNodes.length;
+}
+const ROW_NAME = { contrast: 'Contrast', lightAreas: 'Highlights', darkAreas: 'Shadows', lift: 'Fade', saturation: 'Saturation', warmth: 'Temperature', green: 'Tint', clarity: 'Clarity', grain: 'Grain', vignette: 'Vignette', tintAmount: 'Colour grading' };
+function lookTip(L) {
+  const lines = [L.says];
+  for (const k of L.also) {
+    const r = RECIPES[k], name = (LOOKS[k] && LOOKS[k].label) || k;
+    const colour = row => (row === 'tintAmount' && LOOKS[k] && LOOKS[k].p.tint ? ` in ${LOOKS[k].p.tint}` : '');
+    lines.push(r && Object.keys(r).length ? `${name}: ${Object.entries(r).map(([row, v]) => `${ROW_NAME[row] || row} ${v}${colour(row)}`).join(', ')}` : `${name}: close to it as it is`);
+  }
+  return lines.join('\n');
+}
+
 export function filtersPanel(app) {
+  const vp = app.vp;
+  const camera = cameraFilters(app), medium = mediumFilters(app, camera);
+  const which = choice({ options: [['photo', 'Camera'], ['media', 'Medium']], fit: false,
+    titles: { photo: 'The camera takes the picture: its look, its colour and grain, the lens', media: 'The medium shows it: cells, prints, screens, an X-ray film, a radar' },
+    get: () => app.filterSide || 'photo', set: v => { app.filterSide = v; paintSide(); pictures(true); } });
+  const paintSide = () => { const s = app.filterSide || 'photo'; camera.hidden = s !== 'photo'; medium.hidden = s !== 'media'; which.paint(); };
+  const root = el('div', {}, el('section', { class: 'sec' }, which,
+    el('p', { class: 'note' }, 'The camera takes the picture; the medium shows it. Both work on the finished picture and are saved with the scene. Marks stay sharp over them.')), camera, medium);
+  root.paint = () => { paintSide(); camera.paint(); medium.paint(); pictures(true); };
+  let asked = false, last = 0, again = false;
+  const pictures = soon => {
+    if (soon) { last = 0; again = asked; }
+    const side = (app.filterSide || 'photo') === 'photo' ? camera : medium;
+    if (asked || !root.isConnected || !side.tiles.isConnected || !side.tiles.offsetParent || document.hidden || !vp.filterPictures) return;
+    asked = true; last = performance.now();
+    const T = side.tiles.tiles, c0 = T[0].canvas;
+    vp.filterPictures(T.map(t => side.job(t.it.key)), c0.width, c0.height).then(pics => {
+      pics.forEach((img, i) => { if (img) T[i].canvas.getContext('2d').putImageData(img, 0, 0); });
+    }).catch(() => {}).finally(() => { asked = false; if (again) { again = false; last = 0; } });
+  };
+  root.pictures = pictures;
+  setInterval(() => { if (performance.now() - last > 2000) pictures(); }, 250);
+  paintSide();
+  return root;
+}
+
+function cameraFilters(app) {
   const vp = app.vp;
   const P = () => vp.look.post;
   const ensure = () => (vp.look.post ||= {});
-  const val = k => { const p = P(); return p && p[k] !== undefined ? p[k] : POST_DEFAULTS[k]; };
-  const put = k => v => { ensure()[k] = v; ensure().preset = 'custom'; presetRow.paint(); };
-  const s = (label, k, min, max, step, unit, help) => slider({ label, min, max, step, unit, reset: POST_DEFAULTS[k], get: () => val(k), set: put(k), help });
-  const filmRow = choice({ options: [['none', 'None'], ...Object.entries(FILM_LOOKS).map(([k, f]) => [k, f.label])], wrap: true,
-    get: () => (P() && P().film) || 'none',
-    set: v => { ensure().film = v === 'none' ? null : v; repaintAll(root); },
-    titles: Object.fromEntries([['none', 'No film look'], ...Object.entries(FILM_LOOKS).map(([k, f]) => [k, `${f.says} In the manner of Fujifilm ${f.after}.`])]) });
-  const dSet = k => v => { ensure()[k] = v; ensure().diffusion = 'custom'; diffRow.paint(); };
-  const ds = (label, k, min, max, step, help) => slider({ label, min, max, step, reset: POST_DEFAULTS[k], get: () => val(k), set: dSet(k), help });
-  const diffRow = choice({ options: Object.entries(DIFFUSIONS).map(([k, f]) => [k, f.label]), wrap: true,
-    get: () => (P() && P().diffusion) || (val('bloom') || val('veil') || val('softHigh') ? 'custom' : 'none'),
-    set: v => { Object.assign(ensure(), DIFFUSIONS[v].p, { diffusion: v }); repaintAll(root); },
-    titles: Object.fromEntries(Object.entries(DIFFUSIONS).map(([k, f]) => [k, f.says || 'None'])) });
-  const band = () => (P() && P().band) || null;
-  const setBand = (k, v) => { const b = ensure().band ||= { center: 0.56, half: 0.13, blur: 5 }; b[k] = v; ensure().preset = 'custom'; presetRow.paint(); };
-  const presetRow = choice({ options: Object.entries(FILTER_PRESETS).map(([k, f]) => [k, f.label]), wrap: true,
-    get: () => (P() && P().preset) || 'none',
-    set: v => {
-      const keep = Object.fromEntries(Object.entries(P() || {}).filter(([k]) => ['film', 'filmAmount', 'highlights', 'shadows', 'colour', 'warmth', 'green', 'chrome', 'clarity', 'sharpen', 'bloom', 'bloomFrom', 'bloomSpread', 'bloomTint', 'veil', 'softHigh', 'diffusion'].includes(k)));
-      vp.look.post = v === 'none' && !Object.keys(keep).length ? null : { ...keep, ...(v === 'none' ? {} : copy(FILTER_PRESETS[v].p)), preset: v };
-      app.markDirty(); root.paint();
-    },
-    titles: {
-      none: 'The picture as rendered', photocopy: 'Black and white, hard, grainy, dark corners', haze: 'Soft, glowing, colours pulled apart and pushed up',
-      tape: 'A worn video tape: colours pulled sideways, scan lines, a little blur', miniature: 'A sharp band in a soft picture, like a close photograph of a model',
-      drawing: 'A few flat tones and dark lines, like a diagram', crisp: 'A little more contrast and colour', studio: 'Darker corners, a little contrast',
-      cyanotype: 'Blue and white, like a sun print', sepia: 'Brown and cream, like an old print' } });
-  const bandRows = el('div');
-  bandRows.append(
-    slider({ label: 'Where', min: 0, max: 1, step: 0.01, get: () => (band() || { center: 0.56 }).center, set: v => setBand('center', v), help: 'Height of the sharp band: 0 the top of the picture, 1 the bottom.' }),
-    slider({ label: 'Band height', min: 0.02, max: 0.5, step: 0.01, get: () => (band() || { half: 0.13 }).half, set: v => setBand('half', v) }),
-    slider({ label: 'Blur', min: 0, max: 14, step: 0.5, unit: ' px', get: () => (band() || { blur: 5 }).blur, set: v => setBand('blur', v), help: 'How soft the picture gets above and below the band.' }));
+  const E = () => effectivePost(P()) || {};
+  const val = k => { const e = E(); return e[k] !== undefined ? e[k] : POST_DEFAULTS[k]; };
+  const own = k => !!P() && P()[k] !== undefined;
+  const base = k => { const p = P(), b = p && p.look ? effectivePost({ look: p.look, amount: p.amount ?? 1 }) : {}; return b[k] !== undefined ? b[k] : POST_DEFAULTS[k]; };
+  const same = (x, y) => (typeof x === 'number' && typeof y === 'number' ? Math.abs(x - y) < 1e-9 : JSON.stringify(x ?? null) === JSON.stringify(y ?? null));
+  const changedByHand = k => own(k) && !same(P()[k], base(k));
+  const shows = [];
+  const showRows = () => { for (const [row, fn] of shows) row.hidden = !fn(); };
+  const when = (row, fn) => { if (fn) shows.push([row, fn]); return row; };
+  const changed = () => { app.markDirty(); showRows(); newPattern.classList.toggle('off', !grainy()); };
+  const tidy = () => { const p = P(); if (p && !Object.values(p).some(v => v !== undefined)) vp.look.post = null; };
+  const put = (k, v) => { ensure()[k] = v; };
+  const unset = (...ks) => { const p = P(); if (p) for (const k of ks) delete p[k]; tidy(); changed(); };
+  const owned = (...ks) => ks.some(k => changedByHand(k));
+  const s = (label, k, min, max, step, unit, help, onlyIf) => when(slider({ label, min, max, step, unit, help, get: () => val(k), set: v => { put(k, v); changed(); },
+    toDefault: () => unset(k), isDefault: () => !changedByHand(k) }), onlyIf);
+  const merged = (label, keys, min, max, step, unit, help, get, set, onlyIf, slot) => when(slider({ label, min, max, step, unit, help, slot, get, set: v => { set(v); changed(); },
+    toDefault: () => unset(...keys), isDefault: () => !owned(...keys) }), onlyIf);
+  const swatch = (k, label) => {
+    const input = el('input', { type: 'color', class: 'swatch', 'aria-label': label, title: label });
+    input.addEventListener('input', () => { put(k, input.value); changed(); });
+    input.paint = () => { input.value = val(k); };
+    return input;
+  };
+
+  const lookOf = () => (P() && P().look) || 'none';
+  const items = [{ key: 'none', name: 'None', says: 'No camera look: the picture as the scene draws it.' }, ...LOOK_LIST.map(L => ({ ...L, tip: lookTip(L) }))];
+  const choose = v => { const kept = only(P(), MOVED); vp.look.post = v === 'none' ? (Object.keys(kept).length ? kept : null) : { look: v, amount: 1, ...kept }; anchor = null; app.markDirty(); repaintFilters(); };
+  const repaintFilters = () => (app.panels && app.panels.filters ? app.panels.filters.paint() : root.paint());
+  const tiles = lookTiles({ items, get: lookOf, set: choose });
+  const lookNote = el('p', { class: 'lk-cap' });
+  const amount = when(slider({ label: 'Amount', min: 0, max: 1, step: 0.01, reset: 1, help: 'How much of the look, from none to all of it. What you set by hand stays as you set it.',
+    get: () => (P() && P().amount !== undefined ? P().amount : 1), set: v => { put('amount', v); changed(); } }), () => lookOf() !== 'none');
+  let anchor = null, lastAuto = null;
+  const autoAdjustNow = () => {
+    if (!P() || !P().look) vp.look.post = { look: 'waroptics', amount: 1, ...only(P(), MOVED) };
+    const now = E();
+    if (!anchor || JSON.stringify(P()) !== lastAuto) anchor = copy(now);
+    const next = autoAdjust(anchor, now), p = ensure();
+    for (const [k, v] of Object.entries(next)) if (v !== now[k]) p[k] = v;
+    lastAuto = JSON.stringify(P());
+    app.markDirty(); repaintFilters();
+  };
+  const reset = () => { const L = P() && P().look, kept = only(P(), MOVED); vp.look.post = L ? { look: L, amount: P().amount ?? 1, ...kept } : Object.keys(kept).length ? kept : null; anchor = null; app.markDirty(); repaintFilters(); };
+  const lookButtons = el('div', { class: 'btns' },
+    button('Auto Adjust', autoAdjustNow, { title: 'A variation of the look, a new one each press: what it uses drifts a little and the grain and noise get a new pattern. With nothing on, it starts from War Optics.' }),
+    button('Reset', reset, { title: 'Takes off everything set by hand on this tab: back to the look as it comes.' }));
+
+  const toneColour = swatch('tint', 'Colour grading colour');
+  const grading = merged('Colour grading', ['tintAmount', 'tint'], 0, 1, 0.01, '', 'Pulls every colour toward the colour at the end of the row, keeping its brightness. With Saturation at 0: one colour, as sepia or a cyanotype. (Camera Raw: Color Grading.)',
+    () => val('tintAmount'), v => put('tintAmount', v), null, toneColour);
+  const sharpening = merged('Sharpening', ['sharpen', 'soften'], -1, 1, 0.01, '', 'Plus makes edges crisper; minus softens the whole picture, as a lens a little out of focus.',
+    () => (val('sharpen') > 0 ? val('sharpen') : -val('soften') / 3), v => { put('sharpen', Math.max(v, 0)); put('soften', Math.max(-v, 0) * 3); });
+  const newPattern = el('button', { type: 'button', class: 'slotbtn', title: 'A new pattern of grain and noise, the same amount', 'aria-label': 'A new pattern of grain and noise' }, icon('restart', 14));
+  newPattern.addEventListener('click', () => { put('seed', 1 + Math.floor(Math.random() * 999)); changed(); });
+  const grainy = () => val('grain') > 0 || val('noise') > 0 || !!(FILM_LOOKS[val('film')] || {}).grain;
+  const grain = merged('Grain', ['grain', 'seed'], 0, 0.3, 0.005, '', 'Film grain: clumps of two sizes, most in the middle tones. The button at the end gives a new pattern.',
+    () => val('grain'), v => put('grain', v), null, newPattern);
+  const diffusionOf = () => val('diffusion') || (val('bloom') > 0 ? 'custom' : 'none');
+  const DIFF_KEYS = ['diffusion', 'bloom', 'bloomFrom', 'bloomSpread', 'bloomTint', 'veil', 'softHigh'];
+  const diffusionMenu = pick({ label: 'Diffuse glow', inline: true, help: 'Light spreading from bright parts, as through a diffusion filter: from before the tone curve, so a lamp spreads more than a white wall. (Photoshop: Diffuse Glow.)',
+    options: () => [...Object.entries(DIFFUSIONS).map(([k, f]) => [k, f.label]), ...(diffusionOf() === 'custom' ? [['custom', 'Your own']] : [])],
+    titles: Object.fromEntries(Object.entries(DIFFUSIONS).map(([k, f]) => [k, f.says || 'None'])),
+    get: diffusionOf, set: v => { if (DIFFUSIONS[v]) { for (const [k, x] of Object.entries(DIFFUSIONS[v].p)) put(k, x); put('diffusion', v); } changed(); repaintFilters(); },
+    toDefault: () => unset(...DIFF_KEYS), isDefault: () => !owned(...DIFF_KEYS) });
+  const glowColour = swatch('bloomTint', 'Glow colour');
+  const glow = merged('Glow', DIFF_KEYS, 0, 1.5, 0.01, '', 'How much light the glow spreads, and its colour at the end of the row: white for a filter, red-orange for film\'s halation.',
+    () => val('bloom'), v => {
+      const b = (DIFFUSIONS[diffusionOf()] || {}).p, b0 = b && b.bloom > 0 ? b.bloom : val('bloom') || 1;
+      const veil0 = b ? b.veil : val('veil'), soft0 = b ? b.softHigh : val('softHigh');
+      put('bloom', v); put('veil', veil0 * v / b0); put('softHigh', soft0 * v / b0);
+    }, () => diffusionOf() !== 'none', glowColour);
+  const band = () => val('band');
+  const tiltShift = merged('Tilt-shift', ['band'], 0, 1, 0.01, '', 'A sharp band across the picture, soft above and below it, as in a close photograph of a model. (Photoshop: Tilt-Shift.)',
+    () => (band() ? Math.min(1, band().blur / 10) : 0), v => put('band', v > 0 ? { center: (band() || {}).center ?? 0.56, half: (band() || {}).half ?? 0.13, blur: v * 10 } : null));
+  const bandAt = merged('Band at', ['band'], 0, 1, 0.01, '', 'Where the sharp band is: 0 the top of the picture, 1 the bottom.',
+    () => (band() || {}).center ?? 0.56, v => put('band', { ...(band() || { half: 0.13, blur: 5 }), center: v }), () => !!band());
+
+  const root = el('div', { class: 'photo-side' },
+    section('Look', tiles, lookNote, amount, lookButtons),
+    section('Light',
+      s('Contrast', 'contrast', 0.5, 2, 0.01, '', 'The difference between light and dark, round mid grey.'),
+      s('Highlights', 'lightAreas', -1, 1, 0.01, '', 'Only the tones above mid grey: up blows bright parts out to white, down holds them back.'),
+      s('Shadows', 'darkAreas', -1, 1, 0.01, '', 'Only the tones below mid grey: down crushes dark parts to black, up opens them.'),
+      s('Fade', 'lift', 0, 0.5, 0.01, '', 'Raises the blacks toward white, like faded paper.'),
+      s('Saturation', 'saturation', 0, 2, 0.01, '', 'How much colour: 0 is black and white, 1 as it is.'),
+      s('Temperature', 'warmth', -1, 1, 0.01, '', 'White balance: toward orange, or toward blue. (Camera Raw: Temperature.)'),
+      s('Tint', 'green', -1, 1, 0.01, '', 'White balance: toward green, or toward magenta. (Camera Raw: Tint.)'),
+      grading,
+      s('Clarity', 'clarity', -1, 1, 0.01, '', 'Contrast in the middle sizes: more for grit, less for a dreamy softness.')),
+    section('Detail',
+      sharpening, grain,
+      s('Grain size', 'grainSize', 1, 4, 0.05, ' px', 'How big the grain\'s clumps are, in pixels of a picture 1974 across: the same in any window.', () => val('grain') > 0 || !!(FILM_LOOKS[val('film')] || {}).grain),
+      s('Noise', 'noise', 0, 1, 0.01, '', 'Digital noise: flat grey speckle in every tone, some pixels stuck black or white, as a small sensor pushed hard. (Photoshop: Add Noise.)')),
+    section('Optics',
+      slider({ label: 'Focal length', min: 14, max: 200, step: 1, unit: ' mm', reset: 31, get: () => 12 / Math.tan(vp.camera.fov / 2), set: v => { vp.camera.fov = 2 * Math.atan(12 / v); },
+        help: 'Wide (small numbers) sees more and stretches depth; long (large numbers) flattens it. Step back with the wheel after a longer lens.' }),
+      s('Depth of field', 'aperture', 0, 1, 0.01, '', 'What is out of focus blurs, as through a lens wide open. 0: everything sharp. (Photoshop: Lens Blur.)'),
+      s('Focus distance', 'focus', 0, 30, 0.05, ' m', 'How far off it focuses, along the camera\'s axis. 0: on whatever is at the middle of the picture.', () => val('aperture') > 0),
+      s('Distortion', 'distort', -1, 1, 0.01, '', 'Straight lines bend toward the corners: minus as a long lens does (a pincushion), plus as a wide one (a barrel).'),
+      s('Aberration', 'fringe', 0, 8, 0.05, '', 'Chromatic aberration: red and blue focused a little apart, more toward the corners, as in a cheap lens.'),
+      s('Vignette', 'vignette', 0, 1.2, 0.01, '', 'Less light toward the corners.'),
+      s('Lens flare', 'flare', 0, 1, 0.01, '', 'Bright things throw ghosts across the picture through its middle, and a streak level with them.'),
+      diffusionMenu, glow, tiltShift, bandAt));
+  root.tiles = tiles;
+  root.job = k => ({ post: effectivePost(k === 'none' ? only(P(), MOVED) : { look: k, amount: 1, ...only(P(), MOVED) }), media: effectiveMedia(vp.look.media) });
+  const cellsOn = () => val('resolution') < 100;
+  root.forMedium = {
+    Picture: [
+      s('Mosaic', 'resolution', 0, 100, 1, '', 'The picture rebuilt from cells counted across it, the same cells in any window: 100 is the picture\'s own pixels, 0 about 18 cells. (Photoshop: Mosaic.)'),
+      when(pick({ label: 'Cell shape', inline: true, help: 'What each cell is drawn as. Print shapes are black ink on paper that grows as the cell darkens.',
+        options: CELL_SHAPES.map(c => [c.id, c.label]), titles: Object.fromEntries(CELL_SHAPES.map(c => [c.id, c.says])),
+        get: () => val('cellShape'), set: v => { put('cellShape', v); changed(); }, toDefault: () => unset('cellShape'), isDefault: () => !changedByHand('cellShape') }), cellsOn)],
+    Levels: [s('Poster edges', 'ink', 0, 1, 0.01, '', 'Dark lines where the picture changes sharply, like a drawing. (Photoshop: Poster Edges.)')],
+    Colours: [
+      s('Posterize', 'posterize', 0, 12, 1, ' steps', 'A few flat tones (0: off). (Photoshop: Posterize.)'),
+      when(pick({ label: 'Dither', inline: true, help: 'Every cell black or white, in a pattern that reads as grey: the look of a receipt.',
+        options: DITHERS.map(d => [d.id, d.label]), titles: Object.fromEntries(DITHERS.map(d => [d.id, d.says])),
+        get: () => val('dither'), set: v => { put('dither', v); changed(); }, toDefault: () => unset('dither'), isDefault: () => !changedByHand('dither') }), cellsOn)],
+    Print: [
+      merged('Border', ['border', 'borderWidth', 'keyline'], 0, 100, 1, '', 'A white paper border round the picture, as a darkroom print, never over it: its width, as a share of the picture\'s short side (100 is 14 % of it). 0: none.',
+        () => (val('border') ? val('borderWidth') : 0), v => { put('border', v > 0); if (v > 0) put('borderWidth', v); }),
+      when(toggle({ label: 'Keyline', help: 'A thin dark rule in the paper, just out from the picture\'s edge.', get: () => !!val('keyline'), set: v => { put('keyline', v); changed(); } }), () => !!val('border'))],
+  };
+  root.showRows = showRows;
+  root.paint = () => {
+    if (P()) upgradePost(P());
+    const L = lookOf();
+    lookLine(lookNote, items, L, LOOKS[L] && LOOKS[L].label);
+    toneColour.paint(); glowColour.paint();
+    newPattern.classList.toggle('off', !grainy());
+    tiles.paint();
+    showRows();
+    repaintAll(root);
+  };
+  root.paint();
+  return root;
+}
+
+const MEDIUM_ROWS = [
+  ['Picture', [
+    ['res', 'Pixels across', 0, 1024, 1, '', 'The picture is drawn at this many pixels across, then shown large. 0: as it is. A first 3D console was 320, a pocket handheld 160.'],
+    ['aspect', 'Screen shape', 0, 2, 0.01, '', 'Height over width of the screen inside the frame: 0.9 a pocket handheld. 0: the whole picture.'],
+    ['snap', 'Wobbling shapes', 0, 1, 1, '', 'On: objects\' corners are held to the coarse pixels, as the first 3D consoles held them, so shapes wobble as the camera moves. Needs Pixels across.']]],
+  ['Levels', [
+    ['gain', 'Brightness', 0, 3, 0.01, '', 'The medium\'s own brightness. (Photoshop: Brightness/Contrast.)'], ['contrast', 'Contrast', 0, 3, 0.01, '', 'The medium\'s own contrast: a copier makes everything harder.'],
+    ['gamma', 'Midtones', 0.2, 3, 0.01, '', 'Lightens or darkens the middle tones. (Photoshop: Levels, the middle slider.)'],
+    ['invert', 'Invert', 0, 1, 1, '', 'Light and dark turned round. (Photoshop: Invert.)'],
+    ['edge', 'Find edges', -1, 2, 0.01, '', 'Edges in the picture stand out: above 0 bright, below 0 dark. (Photoshop: Find Edges.)'],
+    ['threshold', 'Threshold', 0, 1, 0.01, '', 'Only black and white: white from this brightness up. 0: off. (Photoshop: Threshold.)'], ['soft', 'How hard', 0, 0.3, 0.005, '', 'How soft that step is.']]],
+  ['Colours', [
+    ['bits', 'Colour depth', 0, 8, 1, '', 'Bits for each of red, green and blue: 5 is what the first 3D consoles had. 0: off.'],
+    ['dither', 'Dither amount', 0, 1, 0.01, '', 'Between two levels of colour depth or of the map, a fixed pattern of pixels of each.'], ['ditherSize', 'Dither size', 1, 8, 1, ' px'],
+    ['palette', 'Gradient map', 0, 4, 1, '', 'Every brightness becomes one of these colours, the darkest first. 0: off. (Photoshop: Gradient Map.)'],
+    ['smoothPalette', 'Smooth map', 0, 1, 1, '', 'On: a smooth ramp through the colours. Off: only they.'],
+    ['c0', 'Map colour 1', 'color'], ['c1', 'Map colour 2', 'color'], ['c2', 'Map colour 3', 'color'], ['c3', 'Map colour 4', 'color']]],
+  ['Print', [
+    ['inks', 'Inks', 0, 2, 1, '', '1: one ink on paper, by brightness. 2: two inks out of register, grainy.'], ['ink1', 'First ink', 'color'], ['ink2', 'Second ink', 'color'],
+    ['misreg', 'Ink offset', 0, 16, 0.1, ' px', 'How far the two inks are out of register.'], ['paper', 'Paper', 'color'], ['paperGrain', 'Paper grain', 0, 1, 0.01],
+    ['halftone', 'Halftone', 0, 24, 0.5, ' px', 'A screen of dots this far apart, larger where it is darker. 0: off. (Photoshop: Color Halftone.)'],
+    ['angle', 'Screen angle', 0, 90, 1, '°'], ['cmyk', 'CMYK', 0, 1, 1, '', 'Cyan, magenta, yellow and black dots, each at its own angle.'],
+    ['hatch', 'Crosshatch', 0, 1, 0.01, '', 'Etched lines: the darker the place, the more sets of them. (Photoshop: Crosshatch.)'], ['carve', 'Carved lines', 0, 1.5, 0.01, '', 'The lines of a woodcut, bending with the wood.']]],
+  ['Copier', [
+    ['streak', 'Streaks', 0, 1, 0.01, '', 'Lines along the page, from a dirty drum or a scratched glass.'], ['dropout', 'Toner missing', 0, 1, 0.01, '', 'Patches where the ink did not take.'],
+    ['speck', 'Specks', 0, 1, 0.01], ['skew', 'Crooked page', -5, 5, 0.05, '°']]],
+  ['Screen', [
+    ['curve', 'Spherize', 0, 1.5, 0.01, '', 'The curved glass of a tube. (Photoshop: Spherize.)'], ['scan', 'Scan lines', 0, 1, 0.01], ['mask', 'Colour stripes', 0, 1, 0.01, '', 'The red, green and blue stripes of a tube.'],
+    ['grid', 'Pixel grid', 0, 1, 0.01, '', 'The gaps between an LCD\'s pixels. Needs Pixels across.'], ['glow', 'Screen glow', 0, 1.5, 0.01, '', 'Light from the screen spreading round bright parts.'],
+    ['ghost', 'Slow screen', 0, 0.95, 0.01, '', 'What was shown stays a moment and fades.'], ['vignette', 'Dark edges', 0, 2, 0.01, '', 'The screen or print darker toward its edges.'], ['bezel', 'Frame colour', 'color']]],
+  ['Signal', [
+    ['tear', 'Torn lines', 0, 1, 0.01, '', 'Bands of the picture slip sideways.'], ['jitter', 'Line wander', 0, 1, 0.01], ['roll', 'Rolling', 0, 1, 0.01, '', 'The picture rolls upward, as when a set loses its hold.'],
+    ['blocks', 'Stray blocks', 0, 1, 0.01, '', 'Blocks of the picture out of place, some with their colours swapped.'], ['split', 'Colours apart', 0, 12, 0.1, ' px'],
+    ['noise', 'Static', 0, 0.6, 0.005, '', 'Snow over the picture, as on a weak signal.'], ['flicker', 'Flicker', 0, 0.6, 0.005]]],
+  ['Radar', [
+    ['radar', 'Radar echoes', 0, 1, 1, '', 'What a radar finds, edges and dark places, as steady echoes over the whole picture, read in slices round its middle.'], ['beam', 'Echo colour', 'color']]],
+];
+function mediumFilters(app, camera) {
+  const vp = app.vp;
+  const M = () => vp.look.media;
+  const E = () => effectiveMedia(M()) || {};
+  const val = k => { const e = E(); return e[k] !== undefined ? e[k] : MEDIA_DEFAULTS[k]; };
+  const lookOf = () => (M() && M().look) || 'none';
+  const lookVal = k => { const L = MEDIA_PRESETS[lookOf()]; return L && L.p[k] !== undefined ? L.p[k] : MEDIA_DEFAULTS[k]; };
+  const own = k => !!M() && M()[k] !== undefined;
+  const changedByHand = k => own(k) && M()[k] !== lookVal(k);
+  const tidy = () => { const m = M(); if (m && !Object.keys(m).some(k => m[k] !== undefined && k !== 'amount')) vp.look.media = null; };
+  const put = k => v => { (vp.look.media ||= {})[k] = v; app.markDirty(); paintRows(); };
+  const repaintFilters = () => (app.panels && app.panels.filters ? app.panels.filters.paint() : root.paint());
+  let all = false;
+  const stages = MEDIUM_ROWS.map(([title, list]) => {
+    const made = list.map(([k, label, a, b, step, unit, help]) => (a === 'color' ? color({ label, get: () => val(k), set: put(k) })
+      : a === 0 && b === 1 && step === 1 ? toggle({ label, help, get: () => !!val(k), set: v => put(k)(v ? 1 : 0) })
+      : slider({ label, min: a, max: b, step, unit, help, get: () => val(k), set: put(k),
+        toDefault: () => { const m = M(); if (m) delete m[k]; tidy(); app.markDirty(); paintRows(); repaintAll(root); }, isDefault: () => !changedByHand(k) })));
+    const joined = camera.forMedium[title] || [];
+    const sec = section(title, ...joined, ...made);
+    sec.made = made; sec.list = list; sec.joined = joined.length;
+    return sec;
+  });
+  const paintRows = () => {
+    for (const s of stages) {
+      s.list.forEach(([k], i) => { s.made[i].hidden = !all && !own(k) && val(k) === MEDIA_DEFAULTS[k]; });
+      s.hidden = !s.joined && s.made.every(r => r.hidden);
+    }
+  };
+  const items = [{ key: 'none', name: 'None', says: 'No medium: the picture as the camera gives it.' },
+    ...MEDIA_LIST.map(m => ({ ...m, tip: [m.says, ...m.also.map(k => `${MEDIA_PRESETS[k].label}: the same rows, other values`)].join('\n') }))];
+  const clearMoved = () => { const p = vp.look.post; if (p) { for (const k of MOVED) delete p[k]; if (!Object.values(p).some(v => v !== undefined)) vp.look.post = null; } };
+  const choose = v => { vp.look.media = v === 'none' ? null : { look: v, amount: 1 }; clearMoved(); app.markDirty(); repaintFilters(); };
+  const tiles = lookTiles({ items, get: lookOf, set: choose });
+  const cap = el('p', { class: 'lk-cap' });
+  const amount = slider({ label: 'Amount', min: 0, max: 1, step: 0.01, reset: 1, help: 'How much of the medium: 0 the picture as the camera gives it, 1 all of it.',
+    get: () => (M() && M().amount !== undefined ? M().amount : 1), set: v => { (vp.look.media ||= {}).amount = v; app.markDirty(); } });
+  const reset = () => { const L = lookOf(); vp.look.media = L !== 'none' ? { look: L, amount: (M() && M().amount) ?? 1 } : null; clearMoved(); app.markDirty(); repaintFilters(); };
+  const allRow = toggle({ label: 'Show every setting', help: 'Off: what this medium uses. On: every setting of every stage, to add one to it.', get: () => all, set: v => { all = v; paintRows(); } });
   const root = el('div', {},
-    section('Film', filmRow,
-      el('p', { class: 'note' }, 'Made by hand after each film\'s published character; not measured against a camera. Its name is in each tooltip.'),
-      s('Strength', 'filmAmount', 0, 1, 0.01, '', 'How much of the film look.'),
-      s('Highlights', 'highlights', -1, 1, 0.01, '', 'Over the film: harder or softer bright parts.'),
-      s('Shadows', 'shadows', -1, 1, 0.01, '', 'Over the film: deeper or more open dark parts.'),
-      s('Colour', 'colour', -1, 1, 0.01, '', 'Over the film: more or less colour.'),
-      s('Colour depth', 'chrome', 0, 1, 0.01, '', 'Strong colours deepen and keep their detail.'),
-      s('Warmth', 'warmth', -1, 1, 0.01, '', 'White balance: toward orange or toward blue.'),
-      s('Green or pink', 'green', -1, 1, 0.01, '', 'White balance: toward green or toward magenta.'),
-      s('Clarity', 'clarity', -1, 1, 0.01, '', 'More or less contrast in the middle sizes: minus goes dreamy.'),
-      s('Sharpen', 'sharpen', 0, 1, 0.01),
-      s('Grain', 'grain', 0, 0.3, 0.005),
-      s('Grain size', 'grainSize', 1, 4, 0.05, ' px')),
-    section('Diffusion and bloom', diffRow,
-      el('p', { class: 'note' }, 'Light spreading from bright parts, as through a diffusion filter. It works on the light before the tone curve, so a lamp spreads more than a white wall.'),
-      ds('Amount', 'bloom', 0, 1.5, 0.01, 'How much light spreads.'),
-      ds('From', 'bloomFrom', 0, 3, 0.01, 'How bright a part must be to spread: 0 is all of it, as with a real filter; 1 is a white wall in full light.'),
-      ds('Spread', 'bloomSpread', 0, 1, 0.01, 'How wide: a small halo, or a wide haze.'),
-      color({ label: 'Its colour', get: () => val('bloomTint'), set: dSet('bloomTint'), help: 'White for a filter; red-orange for the halation of film.' }),
-      ds('Veil', 'veil', 0, 0.5, 0.005, 'The light scattered over the whole picture: darks lift, contrast falls.'),
-      ds('Soften whites', 'softHigh', 0, 1, 0.01, 'Blurs the edges of bright parts, leaving the rest sharp.')),
-    section('Picture effects', presetRow,
-      el('p', { class: 'note' }, 'Filters work on the finished picture, like a photo editor\'s. They are saved with the scene. Marks stay sharp over them.')),
-    section('Colour',
-      s('Saturation', 'saturation', 0, 2, 0.01, '', '0 is black and white.'),
-      s('Contrast', 'contrast', 0.5, 2, 0.01),
-      s('Lift darks', 'lift', 0, 0.5, 0.01, '', 'Raises the darks toward white, like faded paper.'),
-      color({ label: 'Tint', get: () => val('tint'), set: put('tint') }),
-      s('Tint amount', 'tintAmount', 0, 1, 0.01, '', 'Pulls every colour toward the tint. With saturation at 0: a picture in one colour.'),
-      s('Posterize', 'posterize', 0, 12, 1, ' steps', 'A few flat tones (0: off).')),
-    section('Print and screen',
-      s('Scan lines', 'scan', 0, 0.5, 0.01),
-      s('Vignette', 'vignette', 0, 1.2, 0.01, '', 'Darker corners.')),
-    section('Lens',
-      s('Soften', 'soften', 0, 4, 0.1, ' px'),
-      s('Colour split', 'split', 0, 8, 0.1, ' px', 'Red and blue pulled sideways, like a worn tape or a cheap lens.'),
-      s('Ink lines', 'ink', 0, 1, 0.01, '', 'Dark lines where the picture changes sharply, like a drawing.')),
-    section('Miniature',
-      toggle({ label: 'Sharp band, soft above and below', get: () => !!band(), set: v => { ensure().band = v ? { center: 0.56, half: 0.13, blur: 5 } : null; ensure().preset = 'custom'; presetRow.paint(); bandRows.hidden = !v; repaintAll(bandRows); } }),
-      bandRows),
-    el('div', { class: 'btns' }, button('No filters', () => { vp.look.post = null; root.paint(); })));
-  root.paint = () => { bandRows.hidden = !band(); repaintAll(root); };
+    section('Medium', tiles, cap, amount, el('div', { class: 'btns' }, button('Reset', reset, { title: 'Takes off everything set by hand on this tab: back to the medium as it comes.' })), allRow),
+    ...stages);
+  root.tiles = tiles;
+  root.job = k => ({ post: effectivePost(without(vp.look.post, MOVED)), media: k === 'none' ? null : effectiveMedia({ look: k, amount: 1 }) });
+  root.paint = () => {
+    if (M()) upgradeMedia(M());
+    const L = lookOf();
+    lookLine(cap, items, L, MEDIA_PRESETS[L] && MEDIA_PRESETS[L].label);
+    amount.hidden = L === 'none';
+    tiles.paint();
+    paintRows();
+    camera.showRows();
+    repaintAll(root);
+  };
   root.paint();
   return root;
 }
