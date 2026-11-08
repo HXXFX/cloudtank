@@ -34,8 +34,9 @@
 <input type="file" id="model-file" accept=".glb,.gltf,.obj,.mtl,.stl,.fbx,.usdz,.usda,.usdc,.usd,.bin,.png,.jpg,.jpeg,.webp" multiple hidden>
 <input type="file" id="scene-file" accept=".cloudtank,.fluidsim,.json" hidden>
 <input type="file" id="image-file" accept="image/*" hidden>
-<div class="loading" id="loading"><div>Preparing the graphics card…</div><div class="bar"><i></i></div><div class="err" id="loading-err"></div></div>
+<div class="loading" id="loading"><div>Preparing the graphics card…</div><div class="bar"><i></i></div><div class="ver" id="loading-version"></div><div class="err" id="loading-err"></div></div>
 
+<script type="module" src="version.js" async></script>
 <script type="module" src="app.js"></script>
 </body>
 </html>

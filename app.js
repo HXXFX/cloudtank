@@ -23,6 +23,13 @@ import { Glass } from './glass.js';
 import { Liquid, MATERIALS } from './liquid.js';
 import * as LookTune from './look-tune.js';
 import { NAME, lockup } from './logo.js';
+import { VERSION, VERSION_DATE } from './version.js';
+import { startApi } from './api.js';
+import { startRecipe, partsBox, MADE_KINDS } from './engine/made.js';
+import { itemData } from './history.js';
+import { eulerAxes, toWorldDir, add } from './engine/math.js';
+import { eulerOf } from './engine/physics.js';
+import { nameFor } from './engine/scene.js';
 
 const $ = id => document.getElementById(id);
 const fmtN = n => Math.round(n).toLocaleString('en-US');
@@ -60,6 +67,7 @@ async function boot() {
     camera: { ...START_CAMERA },
   });
   app.vp = vp;
+  vp.markerIcon = icon;
   vp.display.box = false;
   try {
     await vp.init();
@@ -96,6 +104,7 @@ async function boot() {
   requestAnimationFrame(loop);
   setInterval(tick, 500);
   setInterval(() => { if (app.dirty) save(); }, 2000);
+  startApi(app, { placerFor, addShapes: ADD_SHAPES, undo, redo, newScene, openData, paintTop, params: PARAMS });
 }
 
 function loop(t) {
@@ -159,6 +168,7 @@ app.scenePanelList = () => { if (app.panels.scene && app.tab === 'scene') app.pa
 function buildTop() {
   const vp = app.vp, top = $('top');
   const brand = lockup('a', { href: './', title: NAME });
+  const version = el('span', { class: 'version', title: `Version ${VERSION}, ${VERSION_DATE}` }, `v${VERSION}`);
   const ib = (name, title, onclick, id) => el('button', { type: 'button', class: 'ib', title, 'aria-label': title, onclick, id }, icon(name));
   app.playBtn = ib('pause', 'Pause (Space)', () => togglePlay());
   const speed = el('select', { 'aria-label': 'Speed', title: 'How fast time runs' },
@@ -180,9 +190,9 @@ function buildTop() {
   const undoGroup = el('div', { class: 'group' }, app.undoBtn, app.redoBtn);
   const fileGroup = el('div', { class: 'group' }, newBtn, tb('open', 'Open', 'Open a scene file (Ctrl+O)', () => $('scene-file').click()),
     tb('save', 'Save', 'Save the scene as a file (Ctrl+S). It is also kept in this browser automatically.', () => saveFile()));
-  app.showBtn = tb('eye', 'Show', 'What the view draws: the simulation box, sources, marks, smoke, liquid', () => toggleShow());
+  app.showBtn = tb('eye', 'Show', 'What the view draws: the simulation box, sources, drains and extractors, parts of kits, marks, smoke, liquid', () => toggleShow());
   app.showBtn.setAttribute('aria-haspopup', 'menu');
-  $('show').replaceChildren(...[['box', 'Simulation box'], ['sources', 'Sources'], ['marks', 'Marks'], ['smoke', 'Smoke'], ['liquid', 'Liquid']]
+  $('show').replaceChildren(...[['box', 'Simulation box'], ['sources', 'Sources'], ['takers', 'Drains and extractors'], ['parts', 'Parts of kits'], ['marks', 'Marks'], ['smoke', 'Smoke'], ['liquid', 'Liquid']]
     .map(([k, label]) => toggle({ label, get: () => vp.display[k], set: v => { vp.display[k] = v; } })));
   const focus = ib('focus', 'Bring the camera to the selection (F)', () => vp.frameSelected());
   focus.dataset.label = 'Bring the camera to the selection';
@@ -191,7 +201,7 @@ function buildTop() {
   app.moreBtn = ib('more', 'More', () => toggleMore());
   app.moreBtn.setAttribute('aria-haspopup', 'menu');
   const sepUndo = el('span', { class: 'sep' }), sepFile = el('span', { class: 'sep' });
-  top.append(brand, el('span', { class: 'sep' }),
+  top.append(brand, version, el('span', { class: 'sep' }),
     el('div', { class: 'group' }, app.playBtn, ib('step', 'One step (when paused)', () => { vp.stepOnce = true; }),
       ib('restart', 'Start again: empty the fluids and put moving objects back where they were put', () => { vp.resetFluids(); vp.putBack(); })),
     speedBox, app.timer,
@@ -358,7 +368,10 @@ function fillFlyout(kind) {
   };
   if (kind === 'shapes') {
     fly.append(el('h4', {}, 'Add a shape: drag it into the view, or pick one and click'),
-      ...ADD_SHAPES.map(s => dragTool(s, SHAPES[s].label, `Add a ${SHAPES[s].label.toLowerCase()}: drag it to where it goes`, s)));
+      ...ADD_SHAPES.map(s => dragTool(s, SHAPES[s].label, `Add a ${SHAPES[s].label.toLowerCase()}: drag it to where it goes`, s)),
+      el('h5', {}, 'Draw your own'),
+      dragTool('spin', MADE_KINDS.spin, 'A shape spun from half an outline, as a vase, a bowl or a funnel: draw the outline again in its settings. Drag it to where it goes', 'made:spin'),
+      dragTool('drawnChannel', MADE_KINDS.channel, 'An open channel along a path, to carry water: draw the path again in its settings. Drag it to where it goes', 'made:channel'));
   } else if (kind === 'objects') {
     fly.append(el('h4', {}, 'Add an object: drag it into the view, or pick one and click'));
     for (const g of ASSET_GROUPS) {
@@ -520,6 +533,13 @@ function placerFor(kind) {
       }
       made = r && r.object;
       if (r && r.waiting) toast(`${asset.label} added, but a scene holds ${MAX_EMITTERS} sources and they are all in use: it will start working when you delete one.`, true);
+    } else if (kind.startsWith('made:')) {
+      const recipe = startRecipe(kind.slice(5), vp.fineness.liquid);
+      let id;
+      try { id = vp.modelForRecipe(recipe, { keep: app.history.modelsInUse() }); } catch (e) { toast(e.message, true); return null; }
+      const m = vp.scene.models.get(id);
+      made = vp.scene.addObject({ shape: 'model', model: id, made: recipe, pos: [p[0], 0, p[2]], size: [...m.fileHalf], color: hexToRgb(S.objectColor), material: 'wood' });
+      if (made) { vp.dropToGround(made, p[1]); made.home = { pos: [...made.pos], rot: [...made.rot] }; }
     } else {
       made = vp.scene.addObject({ shape: kind, pos: [p[0], 0, p[2]], color: hexToRgb(S.objectColor),
         moves: MOVES_BY_DEFAULT.has(kind), material: kind === 'ball' ? 'rubber' : 'wood' });
@@ -547,7 +567,8 @@ function startPlacing(kind) {
   vp.placing = placerFor(kind);
   document.body.classList.add('placing');
   const what = SOURCE_KINDS.has(kind) ? { smoke: 'smoke source', liquid: 'liquid source', drain: 'drain', extractor: 'extractor' }[kind]
-    : asset ? asset.label.toLowerCase() : kind.startsWith('light:') ? LIGHT_KINDS[kind.slice(6)].toLowerCase() : SHAPES[kind].label.toLowerCase();
+    : asset ? asset.label.toLowerCase() : kind.startsWith('light:') ? LIGHT_KINDS[kind.slice(6)].toLowerCase()
+    : kind.startsWith('made:') ? MADE_KINDS[kind.slice(5)].toLowerCase() : SHAPES[kind].label.toLowerCase();
   toast(`Click where the ${what} goes (or drag its icon into the view next time). Esc cancels.`);
   paintTools();
 }
@@ -655,6 +676,8 @@ function contextMenu(item, x, y) {
     row(allHidden ? 'eye' : 'eyeOff', (allHidden ? 'Show' : 'Hide') + n, 'H', () => app.toggleHidden(items)),
     ...(items.some(i => i.kind === 'object') ? [row('move', 'Put on the ground' + n, 'End', () => app.groundAll(items))] : []),
     ...(items.every(i => i.kind === 'object' && !vp.scene.emitters.some(e => e.attach && e.attach.to === i.id)) ? [row('soft', items.every(softOn) ? 'Make solid' + n : 'Make soft' + n, '', () => app.toggleSoft(items))] : []),
+    ...(many && items.filter(combinable).length >= 2 ? [row('combine', 'Combine' + n, '', () => app.combine(items))] : []),
+    ...(!many && item.made && item.made.kind === 'combine' ? [row('uncombine', 'Uncombine', '', () => app.uncombine(item))] : []),
     row('objects', 'Select all like this', '', () => app.selectLike(item)),
     row('trash', 'Delete' + n, 'Del', () => app.removeAll(items)));
   menu.hidden = false;
@@ -663,6 +686,70 @@ function contextMenu(item, x, y) {
   menu.style.top = `${Math.max(8, Math.min(y + 2, innerHeight - r.height - 8))}px`;
 }
 app.contextMenu = contextMenu;
+
+
+function combinable(it) {
+  return it.kind === 'object' && (!it.model || it.made) && !app.vp.scene.emitters.some(e => e.attach && e.attach.to === it.id);
+}
+app.combinable = combinable;
+
+app.combine = items => {
+  const vp = app.vp, parts = items.filter(combinable);
+  if (parts.length < 2) { toast('Combine takes two or more shapes, spun outlines or channels.', true); return null; }
+  const box = partsBox(parts);
+  const O = [(box.lo[0] + box.hi[0]) / 2, box.lo[1], (box.lo[2] + box.hi[2]) / 2];
+  const recipe = { kind: 'combine', blend: 0, parts: parts.map(p => {
+    const item = itemData(p);
+    delete item.id; delete item.home; delete item.model;
+    item.pos = p.pos.map((v, k) => +(v - O[k]).toFixed(5));
+    const part = { op: 'add', item };
+    if (p.made) { const m = vp.scene.models.get(p.model); part.frame = { centre: m.madeCentre, half: m.fileHalf }; }
+    return part;
+  }) };
+  let id;
+  try { id = vp.modelForRecipe(recipe, { keep: app.history.modelsInUse() }); } catch (e) { toast(e.message, true); return null; }
+  const m = vp.scene.models.get(id), first = parts[0], look = lookData(first);
+  delete look.tex; delete look.decals;
+  for (const p of parts) vp.scene.remove(p);
+  const o = vp.scene.addObject({ shape: 'model', model: id, made: recipe, pos: O.map((v, k) => v + m.madeCentre[k]), size: [...m.fileHalf],
+    color: [...first.color], finish: first.finish, material: first.material, ...look, name: nameFor(MADE_KINDS.combine) });
+  vp.dropUnusedModels(app.history.modelsInUse());
+  vp.select(o);
+  vp.emit('change');
+  app.commit();
+  return o;
+};
+
+app.uncombine = o => {
+  const vp = app.vp, r = o && o.made;
+  if (!r || r.kind !== 'combine') return [];
+  if (vp.scene.objects.length - 1 + r.parts.length > MAX_OBJECTS) { toast(`A scene can hold ${MAX_OBJECTS} objects: there is no room for its ${r.parts.length} parts.`, true); return []; }
+  const m = vp.scene.models.get(o.model), ax = eulerAxes(o.rot), k = o.size.map((s, i) => s / m.fileHalf[i]), C = m.madeCentre;
+  vp.scene.remove(o);
+  const out = [];
+  for (const p of r.parts) {
+    const it = JSON.parse(JSON.stringify(p.item));
+    it.pos = add(o.pos, toWorldDir(it.pos.map((v, i) => (v - C[i]) * k[i]), ax));
+    it.rot = eulerOf(eulerAxes(it.rot).map(a => toWorldDir(a, ax)));
+    it.size = it.size.map((s, i) => s * k[i]);
+    it.home = { pos: [...it.pos], rot: [...it.rot] };
+    const made = vp.scene.addObject(it);
+    if (made) out.push(made);
+  }
+  vp.ensureMade(app.history.modelsInUse());
+  vp.dropUnusedModels(app.history.modelsInUse());
+  if (out.length > 1) vp.selectAll(out); else vp.select(out[0] || null);
+  vp.emit('change');
+  app.commit();
+  return out;
+};
+
+app.remakeMade = (o, recipe) => {
+  try { app.vp.remakeMade(o, recipe, app.history.modelsInUse()); }
+  catch (e) { toast(e.message, true); return false; }
+  app.vp.emit('change');
+  return true;
+};
 
 
 const hiddenOf = it => it.kind === 'light' ? it.show === false : !!it.hidden;
@@ -727,7 +814,7 @@ function copyOf(item) {
     copy = vp.scene.addObject({ shape: item.shape, pos: item.pos.map((v, k) => v + off[k]), size: [...item.size], rot: [...item.rot],
       color: [...item.color], model: item.model, name: item.name + ' copy',
       moves: item.moves, collides: item.collides, material: item.material, finish: item.finish, motion: item.motion, asset: item.asset,
-      whenInBox: item.whenInBox, home: item.home ? { pos: item.home.pos.map((v, k) => v + off[k]), rot: [...item.home.rot] } : null, ...optionsOf(item), ...lookData(item),
+      whenInBox: item.whenInBox, home: item.home ? { pos: item.home.pos.map((v, k) => v + off[k]), rot: [...item.home.rot] } : null, made: item.made || null, ...optionsOf(item), ...lookData(item),
       ...(item.partLooks ? { partLooks: item.partLooks.map(p => ({ color: [...p.color], finish: p.finish || null, ...lookData(p) })) } : {}) });
   } else if (item.kind === 'emitter') {
     copy = vp.scene.addEmitter({ type: item.type, pos: item.pos.map((v, k) => v + off[k]), radius: item.radius, color: [...item.color],
@@ -782,15 +869,19 @@ function saveFile() {
   toast(`Saved scene.${FILE_EXT} (${(bytes / 1e6).toFixed(bytes > 1e6 ? 1 : 2)} MB) to your downloads.`);
 }
 
+async function openData(data) {
+  await openScene(app.vp, data);
+  app.history.reset();
+  for (const p of Object.values(app.panels)) p.paint();
+  app.speedSelect.value = String(app.vp.settings.speed);
+  app.dirty = true;
+}
+
 async function openFile(file) {
   try {
     const data = JSON.parse(await file.text());
     toast('Opening ' + file.name + '…');
-    await openScene(app.vp, data);
-    app.history.reset();
-    for (const p of Object.values(app.panels)) p.paint();
-    app.speedSelect.value = String(app.vp.settings.speed);
-    app.dirty = true;
+    await openData(data);
     toast('Opened ' + file.name + '.');
   } catch (e) { console.error(e); toast('Could not open it: ' + e.message, true); }
 }
@@ -920,6 +1011,7 @@ function paintInfo() {
   box.replaceChildren(
     el('button', { type: 'button', class: 'ib x', title: 'Close', 'aria-label': 'Close', onclick: () => toggleInfo() }, '✕'),
     el('h2', {}, lockup('span', { 'aria-label': NAME })),
+    el('p', { class: 'version-line' }, `Version ${VERSION} · ${VERSION_DATE}`),
     el('p', {}, 'Smoke and liquid simulated live on your graphics card, in the browser. Made for Chrome or Edge on a computer.'),
     el('h3', {}, 'What does the work'),
     el('table', {},
@@ -960,6 +1052,8 @@ function paintInfo() {
     el('p', {}, 'Objects with weight fall, stack and collide, and water and wind push them: light materials float, heavy ones sink. Drag one and let go to throw it; lifted with the handles it drops straight down when let go (pause first, with Space, to set things up in the air). Collision off lets objects and fluids pass through. The circular-arrow button starts everything again: fluids empty, moving objects back where they were put, timers and motions from the start.'),
     el('h3', {}, 'Objects'),
     el('p', {}, 'To add a shape, an object or a source, drag its icon from the tools into the view: a ring shows where it will stand, on whatever is under the pointer (a table top, or the ground). Or click the icon, then the place. Ready-made pieces in the Objects tool: figures, a studio backdrop, light stands, a toothed ring, clear channels and a clear basin, lab stands, tubes, a ribbed panel, frosted balls, metal blocks, springs, a waffle base, posts, fences, model trees, slats, a frame, and kits that bring their own sources (a mist nozzle, a rail of four, a blower, a pour spout) or take fluid out (a floor drain, an extractor hood); the parts of a kit move, turn, copy and delete with it. Any object can move on its own (Motion) and any source can switch itself on and off (Timer).'),
+    el('p', {}, 'Draw your own, at the end of the Shapes tool: Spin makes a vase, a bowl or a funnel from half an outline spun round an upright line; Channel makes an open channel along a path, closed at its high end, for water to run down. Select one and draw its outline or path again on the pad in its Shape settings; Wall and Inside width set how thick and how wide it is. Select two or more shapes, right-click and Combine to make one thing of them, as Cinema 4D\'s Boolean does: each part is Add, Cut or Overlap, and Blend melts the joins. Uncombine gives the parts back. The water feels a made thing as soon as it is made.'),
+    el('p', {}, 'A source, a drain or an extractor is shown by a small round badge over the picture, with the same picture as its row in the scene list: faint until you point at it, smaller as the camera goes away, and gone far off. A kit\'s own (a floor drain\'s, a hood\'s, a fan\'s, a spout\'s) shows while the kit is selected or pointed at. The Show menu hides each kind (Sources, Drains and extractors, Parts of kits); the eye in the scene list hides one, which keeps working.'),
     el('h3', {}, 'Materials'),
     el('p', {}, 'Click a thing: its Material settings are in the Scene tab. Roughness, Metallic, Specular, Clear coat, Glow and Grain are sliders; click a value to type it. The Finish buttons and Ready materials are shortcuts to them; Clear and Frosted make it glass, with Roughness, Refraction and Tint depth. An imported model\'s parts each have their own: click a part of a selected model to choose it, or use the Part row.'),
     el('h3', {}, 'Pictures on things'),
@@ -976,6 +1070,8 @@ function paintInfo() {
     el('p', {}, `GLB or glTF, FBX, USDZ (or USD, USDC, USDA), OBJ with its MTL, or STL. Use the Model tool or drop the file on the window; pick an OBJ or FBX together with its pictures. Each part keeps its material and pictures. Compressed glTF, and skinning and animation in any file, are not read. Up to ${ATLAS_SLOTS} different models (library objects count) and ${MAX_OBJECTS} objects in a scene.`),
     el('h3', {}, 'The panels'),
     el('p', {}, 'The panels are clear glass that follows the picture: light glass over a light scene, dark glass over a dark one, so their text stays readable.'),
+    el('h3', {}, 'Programs and AI agents'),
+    el('p', {}, 'An AI agent that works in your browser can use Cloudtank\'s own commands rather than clicking: in this page, cloudtank.help() lists them, and each takes one object and returns its answer, for example cloudtank.add({ what: "smoke", at: [0, 1] }). Run from its folder on your own computer, Cloudtank\'s local server also takes the same commands from other programs (an API) and as AI agents\' tools (MCP), and carries them out in the window you have open.'),
     el('h3', {}, 'Saving'),
     el('p', {}, 'The scene is kept in this browser as you work and comes back when you open the app again' +
       (app.savedAt ? ` (last kept at ${app.savedAt.toLocaleTimeString()}).` : '.') + ` Nothing you make is uploaded. Save writes a .${FILE_EXT} file you can open anywhere; older .fluidsim files open too.`),

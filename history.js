@@ -9,7 +9,7 @@ export function itemData(it) {
       home: it.home ? { pos: [...it.home.pos], rot: [...it.home.rot] } : null,
       finish: it.finish || null, motion: it.motion ? { ...it.motion } : null, asset: it.asset || null,
       ...lookData(it), ...(it.partLooks ? { partLooks: it.partLooks.map(p => ({ color: [...p.color], finish: p.finish || null, ...lookData(p) })) } : {}),
-      ...(it.whenInBox ? { whenInBox: { ...it.whenInBox } } : {}), ...optionsOf(it) };
+      ...(it.whenInBox ? { whenInBox: { ...it.whenInBox } } : {}), ...(it.made ? { made: JSON.parse(JSON.stringify(it.made)) } : {}), ...optionsOf(it) };
   }
   if (it.kind === 'mark') { const { held, ...rest } = it; return JSON.parse(JSON.stringify(rest)); }
   if (it.kind === 'light') {
@@ -74,6 +74,7 @@ export class History {
   apply() {
     const S = this.vp.scene, now = this.selection(), step = JSON.parse(this.stack[this.at]);
     restoreItems(S, step);
+    this.vp.ensureMade(this.modelsInUse());
     const G = this.vp.look.ground;
     delete G.pbr; delete G.tex; delete G.decals;
     Object.assign(G, step.ground || {});
@@ -98,7 +99,7 @@ export class History {
 
   modelsInUse() {
     const used = new Set();
-    for (const s of this.stack) for (const o of JSON.parse(s).objects) if (o.model) used.add(o.model);
+    for (const s of this.stack) for (const o of JSON.parse(s).objects) if (o.model && !o.made) used.add(o.model);
     return used;
   }
 }

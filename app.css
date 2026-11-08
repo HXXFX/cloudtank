@@ -106,6 +106,7 @@ body.stirring #view { cursor: cell; }
 .brand { display: flex; align-items: center; gap: 6.3px; font-size: 15px; font-weight: 600; letter-spacing: -0.009em; white-space: nowrap; color: var(--ink); text-decoration: none; }
 .brand svg { display: block; flex: none; }
 .brand .word { font-family: 'Cloudtank Word', Inter, sans-serif; font-weight: 600; font-size: 15.87px; letter-spacing: 0; line-height: 1; font-synthesis: none; }
+.top .version { font-size: 12px; font-weight: 500; line-height: 1; color: var(--ink3); font-variant-numeric: tabular-nums; white-space: nowrap; cursor: default; }
 .spacer { flex: 1; }
 .top > :not(.spacer) { flex: none; }
 .top.compact .speed span, .top.compact .tb .tx { display: none; }
@@ -248,6 +249,9 @@ h3.cat { cursor: pointer; }
 .addmap { display: inline-flex; align-items: center; gap: 4px; }
 .addmap small { font-size: 12px; color: var(--ink3); }
 .decals { display: flex; flex-direction: column; gap: 4px; }
+.madepad { display: block; width: 100%; aspect-ratio: 3 / 2; border: 1px solid var(--line2); border-radius: 8px; background: var(--field); cursor: crosshair; touch-action: none; }
+.madepadrow .note { margin: 0; }
+.madeparts { display: flex; flex-direction: column; gap: 6px; }
 .decal { display: grid; grid-template-columns: 24px minmax(0, 1fr) 24px; align-items: center; gap: 6px; height: 30px; padding: 0 4px; border-radius: 6px; cursor: pointer; color: var(--ink2); }
 .decal img { width: 24px; height: 24px; object-fit: cover; border-radius: 4px; }
 .decal span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -370,6 +374,7 @@ input.text-in { height: 28px; }
 .dialog { position: fixed; top: calc(var(--edge) + var(--top-h) + var(--gap)); right: calc(var(--edge) + 4px); width: 380px; max-height: calc(100vh - 100px); overflow-y: auto; padding: 16px; z-index: 8; background: var(--glass-solid); border-radius: var(--r); box-shadow: var(--pop-shadow); }
 .dialog[hidden] { display: none; }
 .dialog h2 { margin: 0 0 4px; font-size: 15px; line-height: 20px; font-weight: 600; }
+.dialog p.version-line { margin: 0 0 8px; font-size: 12px; color: var(--ink3); font-variant-numeric: tabular-nums; }
 .dialog h3 { margin: 16px 0 6px; font-size: 13px; font-weight: 600; }
 .dialog p, .dialog li { margin: 0 0 6px; color: var(--ink2); }
 .dialog table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -388,6 +393,7 @@ input.text-in { height: 28px; }
 .loading .bar { width: 220px; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
 .loading .bar i { display: block; height: 100%; width: 40%; background: var(--accent); animation: slide 1.1s ease-in-out infinite; }
 @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(260%); } }
+.loading .ver { font-size: 12px; color: var(--ink3); font-variant-numeric: tabular-nums; min-height: 16px; }
 .loading .err { color: var(--bad); max-width: 520px; white-space: pre-wrap; font-size: 13px; text-align: center; }
 
 @media (max-width: 760px) {

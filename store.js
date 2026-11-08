@@ -10,7 +10,7 @@ const VERSION = 1;
 
 export function sceneData(vp, { forFile }) {
   const s = vp.scene;
-  const used = new Set(s.objects.filter(o => o.model).map(o => o.model));
+  const used = new Set(s.objects.filter(o => o.model && !o.made).map(o => o.model));
   const models = [...s.models.values()].filter(m => used.has(m.id)).map(m => m.asset ? { id: m.id, name: m.name, asset: m.asset, design: m.design || 1 } : ({
     id: m.id, name: m.name, prop: m.prop, zUp: m.zUp, color: m.color, fileHalf: m.fileHalf,
     positions: forFile ? toB64(m.positions) : m.positions,
@@ -56,6 +56,7 @@ export async function openScene(vp, data) {
     await vp.addImage(blob, m.name, { id: m.id });
   }
   restoreItems(vp.scene, data);
+  vp.ensureMade();
   if (!data.kits) wakeOldKits(vp.scene);
   if (!data.frosted) for (const o of vp.scene.objects) if (o.asset === 'frosted-ball' && o.finish === 'glass') o.finish = 'frosted';
   clearOldTiles(vp);

@@ -14,6 +14,8 @@ import { ASSET_BY_ID, OBJECT_FINISHES, SWATCHES } from '../engine/assets.js';
 import { motionOn } from '../engine/marks.js';
 import { softOn } from '../engine/softbody.js';
 import { SOFT_KINDS, SOFT_PRESETS, SOFT_DEFAULTS, softValue, softFromPreset, setSoft, isSheet, isSolid, isBalloon } from '../engine/softpresets.js';
+import { PART_OPS } from '../engine/made.js';
+import { madePad } from './madepad.js';
 
 const DEG = 180 / Math.PI;
 const fmtN = n => Math.round(n).toLocaleString('en-US');
@@ -32,6 +34,7 @@ const kindOf = e => e.sink ? (e.type === 'smoke' ? 'extractor' : 'drain') : e.ty
 const sourcesKind = kind => (it, vp) => sourcesOf(it, vp).filter(e => kindOf(e) === kind);
 const anySource = (it, vp) => sourcesOf(it, vp);
 const placed = it => (it.kind === 'emitter' && !it.attach) || isLight(it) || isObject(it);
+const madeOf = (...kinds) => self(t => isObject(t) && !!t.made && kinds.includes(t.made.kind));
 const baseOf = (o, vp) => { const m = o.model ? vp.scene.models.get(o.model) : null; return m ? m.fileHalf : SHAPES[o.shape].size; };
 
 const TOOL_SOURCE = { extractor: { rate: 1, radius: 0.3 }, drain: { rate: 1, radius: 0.15 }, smoke: { rate: 1, radius: 0.24, speed: 0.6, heat: 1 }, liquid: { rate: 1, radius: 0.08, speed: 1.5 } };
@@ -54,11 +57,11 @@ function keepFoot(o, vp, change) {
 }
 
 
-const CATS = {
+export const CATS = {
   extractor: 'Extractor', drain: 'Drain', smoke: 'Smoke source', liquid: 'Liquid source', fluidlook: 'Look of this fluid', fluidown: 'This fluid', aim: 'Direction', timer: 'Timer', soft: 'Soft body',
-  light: 'Light', transform: 'Transform', material: 'Material', texture: 'Texture', decals: 'Decals', physics: 'Physics', collision: 'Collision', motion: 'Motion', draw: 'Rendering',
+  made: 'Shape', light: 'Light', transform: 'Transform', material: 'Material', texture: 'Texture', decals: 'Decals', physics: 'Physics', collision: 'Collision', motion: 'Motion', draw: 'Rendering',
 };
-const CAT_ORDER = ['extractor', 'drain', 'smoke', 'liquid', 'fluidlook', 'fluidown', 'light', 'aim', 'timer', 'soft', 'transform', 'material', 'texture', 'decals', 'physics', 'collision', 'motion', 'draw'];
+const CAT_ORDER = ['extractor', 'drain', 'smoke', 'liquid', 'fluidlook', 'fluidown', 'light', 'aim', 'timer', 'made', 'soft', 'transform', 'material', 'texture', 'decals', 'physics', 'collision', 'motion', 'draw'];
 
 const on = { kind: 'toggle', label: 'On', get: t => t.on !== false, set: (t, v) => { t.on = v; }, def: () => true, also: 'Auto Activate, Enabled' };
 const M = t => (t.motion ||= { travel: 'none', dir: 90, speed: 0.3, distance: 4, spin: 0, bob: 0 });
@@ -368,6 +371,21 @@ export const SETTINGS = [
   { cat: 'motion', kind: 'slider', label: 'Spin', min: -180, max: 180, step: 1, unit: '°/s', on: rigid, get: t => (t.motion && t.motion.spin) || 0, set: (t, v, c) => { M(t).spin = v; motionChanged(t, c); }, def: () => 0, help: 'Turns about up, degrees a second (minus: the other way).', also: 'Rotation Rate' },
   { cat: 'motion', kind: 'slider', label: 'Bob', min: 0, max: 10, step: 0.5, unit: ' cm', on: rigid, get: t => ((t.motion && t.motion.bob) || 0) * 100, set: (t, v, c) => { M(t).bob = v / 100; motionChanged(t, c); }, def: () => 0, help: "A walker's bounce." },
 
+  { cat: 'made', kind: 'madepad', label: 'Drawing', on: madeOf('spin', 'channel'), also: 'Lathe, Sweep, Spline, Profile, Path' },
+  { cat: 'made', kind: 'slider', label: 'Wall', min: 1, max: 20, step: 0.5, unit: ' cm', remake: true, on: madeOf('spin', 'channel'), get: t => t.made.wall * 100,
+    set: (t, v) => { t.made = { ...t.made, wall: v / 100 }; }, also: 'Thickness',
+    help: 'How thick its wall is. Water gets through a wall thinner than one and a half water cells (the note below says how thin that is here).' },
+  { cat: 'made', kind: 'slider', label: 'Inside width', min: 2, max: 60, step: 0.5, unit: ' cm', remake: true, on: madeOf('channel'), get: t => t.made.radius * 200,
+    set: (t, v) => { t.made = { ...t.made, radius: v / 200 }; }, also: 'Radius', help: 'How wide the channel is inside, from rim to rim.' },
+  { cat: 'made', kind: 'madeparts', label: 'Parts', on: madeOf('combine'), also: 'Boolean, Union, Subtract, Intersect, CSG',
+    help: 'Add: part of the thing. Cut: taken out of it. Overlap: only where it meets the rest is kept. The order does not matter.' },
+  { cat: 'made', kind: 'slider', label: 'Blend', min: 0, max: 30, step: 0.5, unit: ' cm', remake: true, on: madeOf('combine'), get: t => (t.made.blend || 0) * 100,
+    set: (t, v) => { t.made = { ...t.made, blend: v / 100 }; }, def: () => 0, also: 'Smooth, Fillet, Metaball',
+    help: 'How far the joins melt into each other. 0 is sharp, as Cinema 4D\'s Boolean.' },
+  { cat: 'made', kind: 'madeinfo', label: 'Made', on: self(t => isObject(t) && !!t.made) },
+  { cat: 'made', kind: 'action', label: 'Uncombine', noCommit: true, on: madeOf('combine'), run: (t, c) => c.uncombine(t),
+    title: 'Back into its parts, each where the combined thing now puts it.', also: 'Make Editable, Explode' },
+
   { cat: 'draw', kind: 'toggle', label: 'Visible', on: it => (isObject(it) || it.kind === 'emitter' || it.kind === 'mark') ? [it] : [], get: t => !t.hidden, set: (t, v) => { if (v) delete t.hidden; else t.hidden = true; }, def: () => true, list: true, also: 'Visible, Actor Hidden In Game',
     help: 'Off: not drawn and not clickable in the view (the eye in the list); it still works: the fluids and objects still feel it.' },
   { cat: 'draw', kind: 'toggle', label: 'Casts a shadow', on: objects, get: t => !t.noShadow, set: (t, v) => { if (v) delete t.noShadow; else t.noShadow = true; }, def: () => true, also: 'Cast Shadow' },
@@ -375,9 +393,10 @@ export const SETTINGS = [
 
 
 function rowFor(p, things, ctx) {
-  const vp = ctx.vp, commit = ctx.commit;
+  const vp = ctx.vp;
   const ts = [...new Set(things.flatMap(it => p.on(it, vp)))];
   if (!ts.length) return null;
+  const commit = p.remake ? () => { for (const t of ts) ctx.remakeMade(t, t.made); ctx.commit(); ctx.repaint(); } : ctx.commit;
   const live = () => ts.filter(t => !p.when || p.when(t));
   const get = i => { const l = live(); if (!l.length) return p.kind === 'numbers' ? 0 : false; return readAll(l, p.kind === 'numbers' ? t => p.get(t, i, ctx) : t => p.get(t, ctx)); };
   const first = () => p.get(live()[0] || ts[0], ctx);
@@ -454,6 +473,34 @@ function rowFor(p, things, ctx) {
       };
       paintList();
       row = box;
+      break;
+    }
+    case 'madepad':
+      row = ts.length === 1 ? madePad(ts[0], ctx) : el('p', { class: 'note' }, 'Select one of them to draw it again.');
+      break;
+    case 'madeparts': {
+      const t = ts[0];
+      if (ts.length > 1) { row = el('p', { class: 'note' }, 'Select one combined thing to see its parts.'); break; }
+      row = el('div', { class: 'madeparts', title: help }, ...t.made.parts.map((part, i) => choice({
+        label: part.item.name || `Part ${i + 1}`, options: PART_OPS, help, fit: true,
+        titles: { add: 'Part of the thing', cut: 'Taken out of the thing', overlap: 'Only where it meets the rest is kept' },
+        get: () => part.op,
+        set: v => { if (v === part.op) return; const next = JSON.parse(JSON.stringify(t.made)); next.parts[i].op = v; if (ctx.remakeMade(t, next)) { ctx.commit(); ctx.rebuild(); } },
+      })));
+      break;
+    }
+    case 'madeinfo': {
+      const text = el('p', { class: 'note' });
+      row = text;
+      text.paint = () => {
+        const t = ts[0], m = vp.scene.models.get(t.model), cell = vp.fineness.liquid;
+        const took = m && m.makeMs ? ` Made in ${Math.round(m.makeMs.all)} ms on the processor: ${fmtN(m.makeMs.triangles)} triangles.` : '';
+        const wall = t.made.wall, thin = wall !== undefined && wall < 1.5 * cell - 1e-6;
+        text.textContent = (ts.length > 1 ? `${ts.length} made things.` : `${t.made.kind === 'combine' ? `${t.made.parts.length} parts.` : 'Drawn.'}${took}`) +
+          (thin ? ` Its wall (${(wall * 100).toFixed(1)} cm) is thinner than one and a half water cells (${(1.5 * cell * 100).toFixed(1)} cm here): water can get through.` : '');
+        text.classList.toggle('warn', thin);
+      };
+      text.paint();
       break;
     }
     case 'dial': row = dial({ label: p.label, help, commit, get, set }); break;

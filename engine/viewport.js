@@ -12,6 +12,7 @@ import { MAX_OBJECTS, MAX_EMITTERS, ATLAS_RES, ATLAS_SLOTS, ATLAS_PAD, OBJ_FLOAT
 import { toUnitSpace, interleave } from './importers.js';
 import { Physics, eulerOf, blocksFluid, setGravity } from './physics.js';
 import { Gizmo, project } from './gizmo.js';
+import { drawMarkers, kindShown } from './markers.js';
 import { ASSET_BY_ID, assetModel, assetModelId } from './assets.js';
 import { drawMarks, pickMark, MARK_TYPES, motionOn } from './marks.js';
 import { drawBox, drawLanding, drawReach, hitBoxHandle, beginBoxDrag, moveBoxDrag } from './boxhandles.js';
@@ -23,6 +24,7 @@ import { add, sub, scale, normalize, fromAngles, clamp, toHalf, eulerAxes, lengt
 import { decalPlace } from './material.js';
 import { SHAPES } from './shapes.js';
 import { SoftWorld, softOn } from './softbody.js';
+import { madeShape, meshOf, fieldOf, boundsOf, guardHalf, MADE_KINDS } from './made.js';
 import { SoftField } from './softfield.js';
 
 const HANDLE_TOOLS = new Set(['move', 'turn', 'size']);
@@ -74,7 +76,9 @@ export class Viewport {
     this.time = 0;
     this.simTime = 0;
     this.playing = true;
-    this.display = { box: true, sources: true, smoke: true, liquid: true, marks: true };
+    this.display = { box: true, sources: true, takers: true, parts: true, smoke: true, liquid: true, marks: true };
+    this.markerStyle = 'badge';
+    this.mouseIn = false;
     this.clean = false;
     this.markerSize = { k: 0.2, min: 0.018 };    this.simFrames = 0;
     this.markHits = new Map();
@@ -522,13 +526,69 @@ export class Viewport {
       prop: unit.prop, fileHalf: unit.fileHalf || null, slot, triangles: unit.positions.length / 9, ready: false,
       color: parsed.color || null, zUp: !!parsed.zUp, asset: parsed.asset || null, design: parsed.design || null,
       uvs: parsed.uvs || null, parts: parsed.parts && parsed.parts.length > 1 ? parsed.parts.map(p => ({ name: p.name, first: p.first, count: p.count })) : null };
+    if (parsed.madeKey) { entry.madeKey = parsed.madeKey; entry.madeCentre = parsed.madeCentre; }
     this.scene.models.set(modelId, entry);
     this.renderer.addMesh('model:' + modelId, mesh, { uvs: entry.uvs });
-    entry.whenReady = this.bakeModel(entry);
+    entry.whenReady = parsed.field ? Promise.resolve(this.writeField(entry, parsed.field, 0)) : this.bakeModel(entry);
     return modelId;
   }
 
-  whenModelsReady(all = false) { return Promise.all([...this.scene.models.values()].filter(m => all || m.asset).map(m => m.whenReady)); }
+  writeField(entry, f, ms) {
+    const half = new Uint16Array(f.length);
+    for (let i = 0; i < f.length; i++) half[i] = toHalf(f[i]);
+    entry.field = f;
+    this.gpu.device.queue.writeTexture({ texture: this.shared.atlas, origin: [0, 0, entry.slot * ATLAS_RES] }, half,
+      { bytesPerRow: ATLAS_RES * 2, rowsPerImage: ATLAS_RES }, [ATLAS_RES, ATLAS_RES, ATLAS_RES]);
+    entry.ready = true;
+    entry.bakeMs = ms;
+    return entry;
+  }
+
+
+  modelForRecipe(recipe, { id, keep } = {}) {
+    const key = JSON.stringify(recipe);
+    for (const m of this.scene.models.values()) if (m.madeKey === key) return m.id;
+    const t0 = performance.now();
+    const shape = madeShape(recipe), mesh = meshOf(shape, recipe.kind === 'spin' ? 90 : 100);
+    if (!mesh.triangles) throw new Error('There is nothing to make: the drawing has no inside.');
+    const b = boundsOf(mesh.positions), h = guardHalf(b.half);
+    const grid = fieldOf(shape, b.centre, h);
+    const parsed = { name: MADE_KINDS[recipe.kind] || 'Made', positions: mesh.positions, normals: mesh.normals, madeKey: key, madeCentre: b.centre, field: grid.field };
+    if (!this.freeSlots.length) this.dropUnusedModels(new Set([...(keep || [])].filter(k => { const m = this.scene.models.get(k); return m && !m.madeKey; })));
+    const made = this.addModel(parsed, id && !this.scene.models.has(id) ? { id } : {});
+    const entry = this.scene.models.get(made);
+    entry.makeMs = { mesh: mesh.ms, grid: grid.ms, all: performance.now() - t0, triangles: mesh.triangles };
+    return made;
+  }
+
+  ensureMade(keep) {
+    for (const o of this.scene.objects) {
+      if (!o.made) continue;
+      const m = o.model && this.scene.models.get(o.model);
+      if (m && m.madeKey === JSON.stringify(o.made)) continue;
+      o.model = this.modelForRecipe(o.made, { id: o.model, keep });
+    }
+  }
+
+  remakeMade(o, recipe, keep) {
+    const was = this.scene.models.get(o.model);
+    const id = this.modelForRecipe(recipe, { keep });
+    const m = this.scene.models.get(id), ax = eulerAxes(o.rot);
+    if (was && was.madeCentre) {
+      const k = o.size.map((s, i) => s / was.fileHalf[i]);
+      const anchor = add(o.pos, this.toWorldOf(ax, was.madeCentre.map((c, i) => -c * k[i])));
+      o.size = m.fileHalf.map((v, i) => v * k[i]);
+      o.pos = add(anchor, this.toWorldOf(ax, m.madeCentre.map((c, i) => c * k[i])));
+      if (o.home) o.home = { pos: [...o.pos], rot: [...o.rot] };
+    }
+    o.made = recipe;
+    o.model = id;
+    this.dropUnusedModels(keep);
+    return id;
+  }
+  toWorldOf(ax, v) { return [0, 1, 2].map(i => ax[0][i] * v[0] + ax[1][i] * v[1] + ax[2][i] * v[2]); }
+
+  whenModelsReady(all = false) { return Promise.all([...this.scene.models.values()].filter(m => all || m.asset || m.madeKey).map(m => m.whenReady)); }
 
   bakeModel(entry) {
     const known = entry.asset && BAKED.get(entry.asset);
@@ -1006,9 +1066,9 @@ export class Viewport {
     this.groundTex = lookNeedsTex(G) || !!G.pbr;
     if (this.groundTex) this.decalCount += packLook(mats, MAX_DRAW, G, { layer, half: null, decalData: this.decalData, decalAt: this.decalCount, groundLook: FINISHES[G.finish] || FINISHES.matte });
     const marker = (name, picked, it) => { mats.fill(0, i * MAT_FLOATS, (i + 1) * MAT_FLOATS); mats[i * MAT_FLOATS + 11] = lineFor(it); meshes.push({ mesh: name, first: 0, count: -1, kind: 0 }); };
-    if (this.display.sources && !this.clean) for (const e of S.emitters) {
+    if (this.markerStyle === 'ball' && !this.clean) for (const e of S.emitters) {
       const onKit = this.kitOf(e);
-      if (e.hidden || (onKit && onKit.hidden)) continue;
+      if (e.hidden || (onKit && onKit.hidden) || !kindShown(this, e)) continue;
       const r = Math.max(e.radius * this.markerSize.k, this.markerSize.min) * this.partScale(e);
       if (S.isPicked(e)) this.pickedDraws.push(i);
       const flag = S.isPicked(e) ? 3 : 2;
@@ -1113,7 +1173,7 @@ export class Viewport {
     c.addEventListener('pointermove', e => this.onMove(e));
     c.addEventListener('pointerup', e => this.onUp(e));
     c.addEventListener('pointercancel', e => this.onUp(e));
-    c.addEventListener('pointerleave', () => { if (!this.drag) this.gizmo.hover = null; });
+    c.addEventListener('pointerleave', () => { this.mouseIn = false; if (!this.drag) this.gizmo.hover = null; });
     c.addEventListener('wheel', e => { e.preventDefault(); this.camera.zoom(Math.exp(e.deltaY * 0.0012)); }, { passive: false });
   }
 
@@ -1158,19 +1218,21 @@ export class Viewport {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (this.clean) {
       if (this.display.marks) drawMarks(ctx, this, W, H, this.markHits); else this.markHits.clear();
+      this.markerRows = [];
       return;
     }
     const dr = this.drag && this.drag.mode === 'box' ? this.drag : null;
     if (this.previewRegion) drawBox(ctx, this.previewRegion, this.camera, W, H, { handles: false });
     else if (this.boxHandles) drawBox(ctx, this.region, this.camera, W, H,
       { hot: dr ? dr.h : this.boxHover, readout: dr && dr.readout, mouse: this.mouseAt });
-    if (this.display.sources) for (const it of this.selectedItems()) {
+    for (const it of this.selectedItems()) {
       const parts = it.kind === 'emitter' ? [it] : it.kind === 'object' ? this.scene.emitters.filter(e => e.attach && e.attach.to === it.id) : [];
-      for (const e of parts) drawReach(ctx, e, this.camera, W, H);
+      for (const e of parts) if (kindShown(this, e)) drawReach(ctx, e, this.camera, W, H);
     }
     if (this.dropPreview) drawLanding(ctx, this.camera, this.dropPreview.at || this.dropPreview.p, W, H);
     if (this.display.marks) drawMarks(ctx, this, W, H, this.markHits);
     else this.markHits.clear();
+    this.markerRows = this.markerStyle === 'badge' ? drawMarkers(ctx, this, W, H) : [];
     const it = this.gizmoTarget();
     if (it) this.gizmo.draw(ctx, it, this.camera, W, H, this.mouseAt);
     this.drawDecalHandles(ctx, W, H);
@@ -1264,6 +1326,7 @@ export class Viewport {
     try { this.canvas.setPointerCapture(e.pointerId); } catch {   }
     const m = this.mouse(e);
     this.mouseAt = [m.cx, m.cy];
+    this.mouseIn = true;
     const right = this.config.rightDrag || 'stir';
     if (e.button === 1 || (e.button === 2 && right === 'pan')) { e.preventDefault(); this.drag = { mode: 'pan', last: m, start: m, button: e.button }; return; }
     if (this.clean) { if (e.button === 0) this.drag = { mode: 'orbit', last: m }; return; }
@@ -1356,6 +1419,7 @@ export class Viewport {
   onMove(e) {
     const m = this.mouse(e);
     this.mouseAt = [m.cx, m.cy];
+    this.mouseIn = true;
     if (!this.drag) {
       const tgt = this.gizmoTarget();
       this.gizmo.hover = tgt ? this.gizmo.hit(tgt, this.camera, m.w, m.h, m.cx, m.cy) : null;

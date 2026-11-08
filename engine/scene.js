@@ -47,7 +47,7 @@ export class Scene {
   isPicked(it) { return !!it && (it === this.selected || this.picks.includes(it)); }
 
   addObject({ shape = 'box', pos = [0, 0.5, 0], size, rot = [0, 0, 0], color = [0.8, 0.8, 0.8], model = null, name, id,
-    moves = false, collides = true, material = 'wood', home = null, finish = null, motion = null, asset = null, whenInBox = null, pbr = null, tex = null, decals = null, partLooks = null, ...options }) {
+    moves = false, collides = true, material = 'wood', home = null, finish = null, motion = null, asset = null, whenInBox = null, pbr = null, tex = null, decals = null, partLooks = null, made = null, ...options }) {
     if (this.objects.length >= MAX_OBJECTS) return null;
     const def = SHAPES[shape];
     const o = { id: id || takeId(), kind: 'object', shape, name: name || nameFor(model ? this.models.get(model).name : def.label),
@@ -61,6 +61,7 @@ export class Scene {
     if (decals && decals.length) o.decals = JSON.parse(JSON.stringify(decals));
     if (partLooks) o.partLooks = JSON.parse(JSON.stringify(partLooks));
     if (o.soft) o.soft = JSON.parse(JSON.stringify(o.soft));
+    if (made) o.made = JSON.parse(JSON.stringify(made));
     if (id) seenId(id);
     this.objects.push(o);
     return o;

@@ -1,6 +1,7 @@
 import { el, slider, numbers, color, choice, toggle, dial, section, button, repaintAll, text, pick, swatches } from './dom.js';
 import { icon } from './icons.js';
 import { SHAPES } from '../engine/shapes.js';
+import { MADE_KINDS } from '../engine/made.js';
 import { LIGHT_PRESETS, BACKGROUNDS, FINISHES, GROUND_PATTERNS, patternOf, copy } from '../engine/environment.js';
 import { DETAIL, gridFor, MAX_SMOKE_CELLS, MAX_LIQUID_CELLS, MAX_PARTICLES, REGION_LIMITS } from '../engine/viewport.js';
 import { sourceLabel, LIGHT_KINDS, MAX_EMITTERS } from '../engine/scene.js';
@@ -28,8 +29,10 @@ export function itemIcon(it) {
   if (it.kind === 'light') return { area: 'lightArea', point: 'lightPoint', spot: 'lightSpot' }[it.type];
   const a = assetOf(it);
   if (a) return a.icon;
+  if (it.made) return MADE_ICON[it.made.kind];
   return it.model ? 'model' : it.shape;
 }
+const MADE_ICON = { spin: 'spin', channel: 'drawnChannel', combine: 'combine' };
 
 const swatchOf = it => it.kind === 'mark' ? (it.color || '#ffffff') : rgbToHex(it.color);
 
@@ -137,6 +140,7 @@ export function scenePanel(app) {
     showTab: k => document.querySelector(`[data-tab="${k}"]`).click(),
     menu: (x, y, items) => app.smallMenu(x, y, items), say: t => app.toast(t, true),
     editDecal: () => app.showDecalHandles(),
+    remakeMade: (o, recipe) => app.remakeMade(o, recipe), uncombine: o => app.uncombine(o),
     rebuild: () => { const body = document.getElementById('body'), keep = body ? body.scrollTop : 0; paintProps(); app.showDecalHandles(); if (body) body.scrollTop = keep; } };
 
   const paintProps = () => {
@@ -159,7 +163,7 @@ export function scenePanel(app) {
       name.addEventListener('change', commit);
       const a = assetOf(it);
       const title = it.kind === 'mark' ? MARK_TYPES[it.type].label : it.kind === 'emitter' ? sourceLabel(it) : it.kind === 'light' ? LIGHT_KINDS[it.type]
-        : a ? a.label : it.model ? 'Model' : SHAPES[it.shape].label;
+        : a ? a.label : it.made ? MADE_KINDS[it.made.kind] : it.model ? 'Model' : SHAPES[it.shape].label;
       props.append(section(null, el('h3', {}, title), name, finder, none));
     }
     if (group.length === 1) { const k = kitStatus(app, it, commit); if (k) props.append(k); }
