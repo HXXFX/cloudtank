@@ -1121,7 +1121,11 @@ export class Viewport {
         b.fieldSlot = this.freeSlots.shift();
       }
       const cell = Math.max(this.flip ? this.flip.cell : 0.06, this.smoke ? this.smoke.cell || 0 : 0);
-      const F = this.softField.build(b, Math.max(b.P.thick, cell * 0.75));
+      const thick = Math.max(b.P.thick, cell * 0.75);
+      const still = b.fieldNow && b.fieldMadeIn === b.fieldSlot && b.fieldThick === thick ? this.softField.still(b, cell * 0.1) : null;
+      if (still) { b.fieldNow.record.vel = still; continue; }
+      const F = this.softField.build(b, thick);
+      b.fieldMadeIn = b.fieldSlot; b.fieldThick = thick;
       this.gpu.device.queue.writeTexture({ texture: this.shared.atlas, origin: [0, 0, b.fieldSlot * ATLAS_RES] }, this.softField.half, { bytesPerRow: ATLAS_RES * 2, rowsPerImage: ATLAS_RES }, [ATLAS_RES, ATLAS_RES, ATLAS_RES]);
       const entry = { slot: b.fieldSlot, prop: F.prop };
       b.fieldNow = { record: { pos: F.pos, size: F.size, rot: [0, 0, 0], shape: 'model', model: 'x', vel: F.vel, spin: F.spin, color: o.color }, models: { get: () => entry } };

@@ -349,9 +349,9 @@ export const COMMANDS = {
   redo: { says: 'Puts back the change undo took back.', run: () => { inner.redo(); return history(); } },
   get_scene: { reads: true, limit: 60, says: 'The whole scene as a Cloudtank scene file (what Save writes), to keep or to open again with open_scene.', args: { pictures: arg('boolean', 'Optional: false leaves out the pictures on things (much smaller)') },
     run: args => { const d = sceneData(app.vp, { forFile: true }); if (args.pictures === false) { d.images = []; d.image = null; } return { scene: d }; } },
-  open_scene: { limit: 120, says: 'Opens a scene from its data (a .cloudtank file\'s contents, or what get_scene gave), in place of the one open. The undo steps start again.', required: ['scene'], args: { scene: arg('object', 'The scene data') },
+  open_scene: { limit: 120, says: 'Opens a scene from its data (a .cloudtank file\'s contents, or what get_scene gave), in place of the one open, paused as every scene opens (play or run starts it). The undo steps start again.', required: ['scene'], args: { scene: arg('object', 'The scene data') },
     run: async args => { await inner.openData(args.scene); told('opened a scene.'); return { opened: true, things: everything(app.vp).length }; } },
-  new_scene: { limit: 120, says: 'Starts a new scene, as New does (the start scene).', run: async () => { await inner.newScene(); told('started a new scene.'); return { things: everything(app.vp).length }; } },
+  new_scene: { limit: 120, says: 'Starts a new scene, as New does (the start scene), paused as every scene opens (play or run starts it).', run: async () => { await inner.newScene(); told('started a new scene.'); return { things: everything(app.vp).length }; } },
 };
 for (const c of Object.values(COMMANDS)) { c.args ||= {}; c.limit ||= 30; }
 

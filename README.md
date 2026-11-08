@@ -11,6 +11,7 @@ a tube screen, a print.
 
 It runs in Chrome or Edge on a computer (it needs WebGPU) and needs an internet connection for its typeface. Your
 scenes stay in your browser; the app sends none of them anywhere. Save writes a `.cloudtank` file you can open again.
+Every scene opens paused: the green Start button (or Space) runs it.
 
 An AI agent that works in your browser can use Cloudtank's own commands rather than clicking: in the page,
 `await cloudtank.help()` lists them, and each takes one object and returns its answer, for example

@@ -63,23 +63,24 @@ export function shapeSdf(x, y, z, o, model) {
 }
 
 function modelSdf(x, y, z, o, model) {
-  const [sx, sy, sz] = o.size;
+  const sx = o.size[0], sy = o.size[1], sz = o.size[2];
   if (!model || !model.field) return sdBox(x, y, z, sx, sy, sz);
   const P = ATLAS_PAD, N = ATLAS_RES;
-  const u = [x / sx, y / sy, z / sz];
-  const c = u.map(v => Math.min(Math.max(v, -P), P));
-  const g = c.map(v => Math.min(Math.max((v / P * 0.5 + 0.5) * N - 0.5, 0), N - 1.0001));
-  const i0 = g.map(Math.floor), f = g.map((v, k) => v - i0[k]);
+  const ux = x / sx, uy = y / sy, uz = z / sz;
+  const cx = Math.min(Math.max(ux, -P), P), cy = Math.min(Math.max(uy, -P), P), cz = Math.min(Math.max(uz, -P), P);
+  const gx = Math.min(Math.max((cx / P * 0.5 + 0.5) * N - 0.5, 0), N - 1.0001);
+  const gy = Math.min(Math.max((cy / P * 0.5 + 0.5) * N - 0.5, 0), N - 1.0001);
+  const gz = Math.min(Math.max((cz / P * 0.5 + 0.5) * N - 0.5, 0), N - 1.0001);
+  const ix = Math.floor(gx), iy = Math.floor(gy), iz = Math.floor(gz), fx = gx - ix, fy = gy - iy, fz = gz - iz;
   const F = model.field;
-  const at = (i, j, k) => F[i + N * (j + N * k)];
   let d = 0;
   for (let dz = 0; dz < 2; dz++) for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
-    const w = (dx ? f[0] : 1 - f[0]) * (dy ? f[1] : 1 - f[1]) * (dz ? f[2] : 1 - f[2]);
-    d += w * at(i0[0] + dx, i0[1] + dy, i0[2] + dz);
+    const w = (dx ? fx : 1 - fx) * (dy ? fy : 1 - fy) * (dz ? fz : 1 - fz);
+    d += w * F[(ix + dx) + N * ((iy + dy) + N * (iz + dz))];
   }
   const p = model.prop;
   const k = Math.min(sx / p[0], sy / p[1], sz / p[2]);
-  const ex = (u[0] - c[0]) * sx, ey = (u[1] - c[1]) * sy, ez = (u[2] - c[2]) * sz;
+  const ex = (ux - cx) * sx, ey = (uy - cy) * sy, ez = (uz - cz) * sz;
   return d * k + Math.hypot(ex, ey, ez);
 }
 

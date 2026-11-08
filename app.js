@@ -94,8 +94,8 @@ async function boot() {
   app.tune = { apply: () => LookTune.apply(app, app.lookTune || LookTune.tuned()), set: T => LookTune.apply(app, T), module: LookTune };
   app.tune.apply();
   app.setTheme(app.themeMode);
-  let t = performance.now();
-  for (let i = 0; i < 120; i++) vp.frame(t += 1000 / 60);
+  openPaused();
+  vp.frame(performance.now());
   await vp.gpu.device.queue.onSubmittedWorkDone();
   vp.lastNow = 0;
   $('loading').classList.add('gone');
@@ -106,6 +106,8 @@ async function boot() {
   setInterval(() => { if (app.dirty) save(); }, 2000);
   startApi(app, { placerFor, addShapes: ADD_SHAPES, undo, redo, newScene, openData, paintTop, params: PARAMS });
 }
+
+function openPaused() { app.vp.playing = false; paintTop(); }
 
 function loop(t) {
   app.vp.frame(t);
@@ -856,6 +858,7 @@ function redo() { app.history.redo(); repaintPanel(); app.markDirty(); }
 
 async function newScene() {
   await openScene(app.vp, startScene());
+  openPaused();
   app.history.reset();
   app.speedSelect.value = String(app.vp.settings.speed);
   await autosaveClear();
@@ -871,6 +874,7 @@ function saveFile() {
 
 async function openData(data) {
   await openScene(app.vp, data);
+  openPaused();
   app.history.reset();
   for (const p of Object.values(app.panels)) p.paint();
   app.speedSelect.value = String(app.vp.settings.speed);
@@ -1039,7 +1043,7 @@ function paintInfo() {
         [el('span', {}, el('kbd', {}, 'Ctrl'), ' ', el('kbd', {}, 'S')), 'save the scene as a file'], [el('span', {}, el('kbd', {}, 'Ctrl'), ' ', el('kbd', {}, 'O')), 'open a scene file']]
         .map(([a, b]) => el('tr', {}, el('td', {}, a), el('td', {}, b)))),
     el('h3', {}, 'The start scene'),
-    el('p', {}, 'The app opens on a clear basin turned over on a light grey floor in the dark, with a ball of soft jelly resting on it: two soft colours of smoke rise under it, two pours land on it, sometimes push the ball off, and spread across the floor to a drain, with one area light, seen close through a wide lens with the Ricoh GR HDF look. It opens empty and fills in about 20 seconds. New brings it back.'),
+    el('p', {}, 'The app opens on a clear basin turned over on a light grey floor in the dark, with a ball of soft jelly resting on it: two soft colours of smoke rise under it, two pours land on it, sometimes push the ball off, and spread across the floor to a drain, with one area light, seen close through a wide lens with the Ricoh GR HDF look. It opens empty and paused, as every scene does: press the green Start button (or Space) and it fills in about 20 seconds. New brings it back.'),
     el('h3', {}, 'Colour and the look of water'),
     el('p', {}, 'Each source has its own colour (Scene tab, with the source selected). Colours mix as dye does: water colours spread where the water is stirred, so yellow and blue make green, and smoke tints what is behind it and its shadow. The Fluids tab sets how the liquid is drawn: Smooth (one surface made from all the particles), Surface (the particles drawn as balls, smoothed together) or Particles.'),
     el('h3', {}, 'Each fluid its own'),
