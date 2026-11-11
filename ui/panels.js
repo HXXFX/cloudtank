@@ -764,7 +764,7 @@ function cameraFilters(app) {
       s('Grain size', 'grainSize', 1, 4, 0.05, ' px', 'How big the grain\'s clumps are, in pixels of a picture 1974 across: the same in any window.', () => val('grain') > 0 || !!(FILM_LOOKS[val('film')] || {}).grain),
       s('Noise', 'noise', 0, 1, 0.01, '', 'Digital noise: flat grey speckle in every tone, some pixels stuck black or white, as a small sensor pushed hard. (Photoshop: Add Noise.)')),
     section('Optics',
-      slider({ label: 'Focal length', min: 14, max: 200, step: 1, unit: ' mm', reset: 31, get: () => 12 / Math.tan(vp.camera.fov / 2), set: v => { vp.camera.fov = 2 * Math.atan(12 / v); },
+      slider({ label: 'Focal length', min: 14, max: 200, step: 1, unit: ' mm', unitAt: 'value', reset: 31, get: () => 12 / Math.tan(vp.camera.fov / 2), set: v => { vp.camera.fov = 2 * Math.atan(12 / v); },
         help: 'Wide (small numbers) sees more and stretches depth; long (large numbers) flattens it. Step back with the wheel after a longer lens.' }),
       s('Depth of field', 'aperture', 0, 1, 0.01, '', 'What is out of focus blurs, as through a lens wide open. 0: everything sharp. (Photoshop: Lens Blur.)'),
       s('Focus distance', 'focus', 0, 30, 0.05, ' m', 'How far off it focuses, along the camera\'s axis. 0: on whatever is at the middle of the picture.', () => val('aperture') > 0),
@@ -808,6 +808,7 @@ function cameraFilters(app) {
   return root;
 }
 
+const UNIT_ON_VALUE = new Set(['split']);
 const MEDIUM_ROWS = [
   ['Picture', [
     ['res', 'Pixels across', 0, 1024, 1, '', 'The picture is drawn at this many pixels across, then shown large. 0: as it is. A first 3D console was 320, a pocket handheld 160.'],
@@ -861,7 +862,7 @@ function mediumFilters(app, camera) {
   const stages = MEDIUM_ROWS.map(([title, list]) => {
     const made = list.map(([k, label, a, b, step, unit, help]) => (a === 'color' ? color({ label, get: () => val(k), set: put(k) })
       : a === 0 && b === 1 && step === 1 ? toggle({ label, help, get: () => !!val(k), set: v => put(k)(v ? 1 : 0) })
-      : slider({ label, min: a, max: b, step, unit, help, get: () => val(k), set: put(k),
+      : slider({ label, min: a, max: b, step, unit, unitAt: UNIT_ON_VALUE.has(k) ? 'value' : undefined, help, get: () => val(k), set: put(k),
         toDefault: () => { const m = M(); if (m) delete m[k]; tidy(); app.markDirty(); paintRows(); repaintAll(root); }, isDefault: () => !changedByHand(k) })));
     const joined = camera.forMedium[title] || [];
     const sec = section(title, ...joined, ...made);

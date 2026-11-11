@@ -224,6 +224,7 @@ h3.cat { cursor: pointer; }
 .note.warn { color: var(--warn); }
 .row.slider, .row.toggle { min-height: 24px; }
 .row > label, .row .lab { color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row > label[data-unit]::after { content: attr(data-unit); margin-left: 4px; font-size: 10.5px; font-weight: 400; line-height: 0; color: var(--ink3); }
 .row output { font-size: 12px; color: var(--ink3); text-align: right; white-space: nowrap; }
 .row input[type=range] { width: 100%; margin: 0; height: 20px; cursor: pointer; background: none; -webkit-appearance: none; appearance: none; }
 .row input[type=range]::-webkit-slider-runnable-track { height: 2px; border-radius: 1px; background: linear-gradient(to right, var(--ink2) var(--p, 0%), var(--line2) var(--p, 0%)); }

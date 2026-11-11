@@ -31,12 +31,13 @@ const fmt = (v, step) => {
 };
 
 const fmtLog = x => { const v = +x; return v >= 10 ? v.toFixed(1) : v >= 1 ? v.toFixed(2) : v.toFixed(3); };
+const unitBesideName = o => !!o.unit && o.unitAt !== 'value' && !/^\s*(°|×)\s*$/.test(o.unit);
 export function slider(o) {
   const out = el('output', { title: 'Click to type a value' });
-  const log = !!o.log;
+  const log = !!o.log, side = unitBesideName(o);
   const toPos = v => (log ? Math.log(Math.max(v, o.min) / o.min) / Math.log(o.max / o.min) * 1000 : v);
   const fromPos = p => (log ? +(o.min * Math.pow(o.max / o.min, p / 1000)).toPrecision(3) : p);
-  const words = v => (log ? fmtLog(v) : fmt(v, o.step)) + (o.unit || '');
+  const words = v => (log ? fmtLog(v) : fmt(v, o.step)) + (side ? '' : o.unit || '');
   const input = el('input', { type: 'range', min: log ? 0 : o.min, max: log ? 1000 : o.max, step: log ? 1 : o.step, 'aria-label': o.label });
   let arrow = () => {};
   const fill = () => { const lo = +input.min, hi = +input.max; input.style.setProperty('--p', `${(+input.value - lo) / Math.max(hi - lo, 1e-9) * 100}%`); };
@@ -68,7 +69,7 @@ export function slider(o) {
     box.select();
   });
   const row = el('div', { class: 'row slider' + (o.slot ? ' has-slot' : ''), title: o.help || undefined },
-    el('label', {}, o.label), input, out, o.slot || null);
+    el('label', side ? { 'data-unit': o.unit.trim() } : {}, o.label), input, out, o.slot || null);
   arrow = resetArrow(row, o, paint);
   row.paint = paint;
   paint();
