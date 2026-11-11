@@ -289,6 +289,21 @@ h3.cat { cursor: pointer; }
 .row.toggle input:checked ~ .knob { background: var(--accent); border-color: var(--accent); }
 .row.toggle input:checked ~ .knob::after { transform: translateX(14px); background: var(--accent-ink); }
 .row.toggle input:focus-visible ~ .knob { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pins { display: flex; flex-direction: column; gap: 6px; }
+.row.pins-head { grid-template-columns: 92px minmax(0, 1fr) auto; }
+.row.pin { grid-template-columns: 92px minmax(0, 1fr) 34px auto; }
+.row.pin .where { color: var(--ink3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row.pin.off > label, .row.pin.off .where { opacity: 0.6; }
+.row.pin .hold { position: relative; width: 34px; height: 20px; cursor: pointer; }
+.row.pin .hold input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.row.pin .hold .knob { display: block; width: 34px; height: 20px; border-radius: 10px; background: var(--field-hover); border: 1px solid var(--line2); position: relative; pointer-events: none; transition: background-color 0.15s; }
+.row.pin .hold .knob::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--ink2); transition: transform 0.15s; }
+.row.pin .hold input:checked ~ .knob { background: var(--accent); border-color: var(--accent); }
+.row.pin .hold input:checked ~ .knob::after { transform: translateX(14px); background: var(--accent-ink); }
+.row.pin .hold input:focus-visible ~ .knob { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pins .btn.small { height: 26px; padding: 0 8px; }
+.pins .btn.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.pins .pinhint { margin: 0; }   
 .row.dialrow { grid-template-columns: 92px 64px 1fr; min-height: 68px; }
 .dial { cursor: pointer; touch-action: none; }
 .dial-ring { fill: var(--ring-fill); stroke: var(--line2); stroke-width: 1.5; }

@@ -245,6 +245,7 @@ export class SoftBody {
     }
     const at = softValue(s, 'pinAt');
     if (at) for (const q of at) {
+      if (q.length > 3 && q[3] === 0) continue;
       const px = q[0] * o.size[0], py = q[1] * o.size[1], pz = q[2] * o.size[2];
       let b = -1, bd = 1e18;
       for (let i = 0; i < n; i++) { const d = (r[i * 3] - px) ** 2 + (r[i * 3 + 1] - py) ** 2 + (r[i * 3 + 2] - pz) ** 2; if (d < bd) { bd = d; b = i; } }

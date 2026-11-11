@@ -13,6 +13,7 @@ import { fromAngles } from '../engine/math.js';
 import { ASSET_BY_ID, OBJECT_FINISHES, SWATCHES } from '../engine/assets.js';
 import { motionOn } from '../engine/marks.js';
 import { softOn } from '../engine/softbody.js';
+import { pinPlaces, removePin, setHold, whereWords } from '../engine/pins.js';
 import { SOFT_KINDS, SOFT_PRESETS, SOFT_DEFAULTS, softValue, softFromPreset, setSoft, isSheet, isSolid, isBalloon } from '../engine/softpresets.js';
 import { PART_OPS } from '../engine/made.js';
 import { madePad } from './madepad.js';
@@ -139,7 +140,11 @@ const softable = (it, vp) => (isObject(it) && !vp.scene.emitters.some(e => e.att
 const softs = (it, vp) => softable(it, vp).filter(softOn);
 const SV = (t, k) => softValue(t.soft, k);
 const SD = (t, k) => { const P = SOFT_PRESETS[t.soft.base]; return P && P[k] !== undefined ? P[k] : SOFT_DEFAULTS[k]; };
-const softRow = (label, key, extra = {}) => { const k = extra.k || 1; return { cat: 'soft', label, on: softs, get: t => SV(t, key) * k, set: (t, v) => { t.soft[key] = v / k; t.soft.preset = 'custom'; }, def: t => SD(t, key) * k, ...extra }; };
+const softRow = (label, key, extra = {}) => {
+  const k = extra.k || 1, scaled = extra.kind === 'slider';
+  return { cat: 'soft', label, on: softs, get: t => (scaled ? SV(t, key) * k : SV(t, key)), set: (t, v) => { t.soft[key] = scaled ? v / k : v; t.soft.preset = 'custom'; },
+    def: t => (scaled ? SD(t, key) * k : SD(t, key)), ...extra };
+};
 const sheetOf = t => isSheet(t.soft), solidOf = t => isSolid(t.soft), airOf = t => isBalloon(t.soft);
 const SOFT_FIRST = { cloth: 'cotton', solid: 'jelly', balloon: 'party' };
 
@@ -148,6 +153,7 @@ const SOFT_ROWS = [
   { cat: 'soft', kind: 'choice', label: 'Acts as', wrap: true, on: softs, options: Object.entries(SOFT_KINDS), get: t => SV(t, 'kind'), set: (t, v, c) => { t.soft = { ...softFromPreset(SOFT_FIRST[v], t.soft), on: true }; c.repaint(); c.rebuild(); }, also: 'Cloth, Tetrahedral, Struts, Pressure, Balloon',
     titles: { cloth: 'Only its surface, with no air: a sheet, a blanket, a bag', solid: 'Filled right through, as jelly, foam or rubber is', balloon: 'Its surface, holding the air inside it' } },
   { cat: 'soft', kind: 'pick', label: 'Ready-made', on: softs, options: ts => Object.entries(SOFT_PRESETS).filter(([, P]) => P.kind === SV(ts[0], 'kind')).map(([k, P]) => [k, P.label]).concat([['custom', 'As set below']]), get: t => SV(t, 'preset'), set: (t, v, c) => { if (v === 'custom') return; t.soft = { ...softFromPreset(v, t.soft), on: true }; c.repaint(); c.rebuild(); }, also: 'Preset, Material, Silk, Cotton, Denim, Leather, Rubber, Jelly, Foam, Silicone, Balloon', help: 'A starting point in the range published for that kind of thing, not a measurement of a particular one. Everything below is yours to change.' },
+  { cat: 'soft', kind: 'pins', label: 'Pins', on: softs, also: 'Pin, Pinned, Pin Group, Fix Points, Attach, Max Distance, Hold, Let go', help: 'What holds it where it is. Pin, then click on it to place a pin; click a pin\'s head to take it off; Esc or Done when you have finished. A pin with its Holds switch off stays in the list and holds nothing.' },
   softRow('Weight', 'sheet', { kind: 'slider', log: true, min: 0.01, max: 10, step: 1, unit: ' kg/m²', when: sheetOf, known: 'Unreal: Density · Houdini: Mass, Density · Blender: Vertex Mass · Unity: mass', also: 'Mass, Density, Vertex Mass', help: 'What a square metre weighs. Silk 0.06, a bed sheet 0.2, denim 0.45, a wool blanket 0.6.' }),
   softRow('Stretch', 'stretch', { kind: 'slider', log: true, min: 1, max: 1000000, step: 1, unit: ' N/m', when: sheetOf, known: 'Unreal: Edge Stiffness · Houdini: Stretch Stiffness · Blender: Tension · Unity: Stretching Stiffness', also: 'Edge Stiffness, Stretch Stiffness, Tension, Stretching Stiffness', help: 'How hard it is to pull it longer. At 1,000 N/m, a strip a metre wide stretches 1 % under 10 newtons. Real fabrics are far stiffer than the solver can hold at few steps, and then read as hardly stretching at all: raise Steps for the difference.' }),
   softRow('Squeeze', 'compress', { kind: 'slider', log: true, min: 0.1, max: 1000000, step: 1, unit: ' N/m', when: sheetOf, known: 'Blender: Compression · Houdini: Compression Stiffness', also: 'Compression, Compression Stiffness', help: 'How hard it is to push it shorter. Real cloth buckles rather than shortens: far less than Stretch, and it wrinkles more easily.' }),
@@ -169,9 +175,6 @@ const SOFT_ROWS = [
   softRow('Bounce', 'bounce', { kind: 'slider', min: 0, max: 1, step: 0.01, also: 'Restitution', help: 'How much of its speed into a surface it comes back with. It has its own spring too: this adds to that.' }),
   softRow('Own folds collide', 'self', { kind: 'toggle', when: sheetOf, get: t => SV(t, 'self') !== false, set: (t, v) => { t.soft.self = v; t.soft.preset = 'custom'; }, def: undefined, known: 'Unreal: Self Collision · Houdini: Self Collisions · Blender: Self Collisions · Unity: Self Collision', also: 'Self Collision, Self Collisions', help: 'Its folds do not pass through each other. A sheet that crumples costs more with this on.' }),
   softRow('Fold gap', 'selfGap', { kind: 'slider', min: 0, max: 10, step: 0.1, unit: ' cm', when: t => sheetOf(t) && SV(t, 'self') !== false, known: 'Unreal: Self Collision Thickness · Unity: Self Collision Distance · Blender: Self Collision Distance', also: 'Self Collision Thickness, Self Collision Distance', help: '0: worked out from its cell, as near as it can be without its folds slipping between each other\'s points.' }),
-  softRow('Pinned', 'pin', { kind: 'choice', wrap: true, options: [['none', 'Free'], ['edge', 'Edge'], ['two', '2 corners'], ['four', '4 corners'], ['middle', 'Middle']], known: 'Unreal: Max Distance · Houdini: Pin to Animation · Blender: Pin Group · Unity: Max Distance', also: 'Pin, Pin Group, Max Distance, Attach, Fix', titles: { none: 'Nothing holds it', edge: 'Its top edge (lying flat: its far edge)', two: 'The two top corners', four: 'All four corners', middle: 'One point at its middle' }, help: 'What holds it where it is. Moving it with its handles moves what is pinned, and the rest follows.' }),
-  { cat: 'soft', kind: 'toggle', label: 'Click on it to pin', on: softs, noCommit: true, get: (t, c) => !!c.vp.pinTool, set: (t, v, c) => { c.vp.pinTool = v; }, also: 'Pin, Paint, Point', help: 'While this is on, a click on it pins that place, or unpins it if it is pinned. Off, dragging it takes hold of it while it runs.' },
-  { cat: 'soft', kind: 'action', label: 'Let go of all pins', on: softs, when: t => SV(t, 'pin') !== 'none' || !!(t.soft.pinAt && t.soft.pinAt.length), run: t => { t.soft.pin = 'none'; t.soft.pinAt = null; } },
   softRow('Cell size', 'cell', { kind: 'slider', min: 0, max: 30, step: 0.1, unit: ' cm', known: 'Unreal: Resolution · Houdini: Target Edge Length · Blender: Subdivisions', also: 'Resolution, Subdivision, Edge Length, Detail, Target Edge Length', help: 'How far apart its points are. Finer: smaller wrinkles, and more of the processor\'s time. 0: worked out from its size, about 2,500 points.' }),
   softRow('Steps', 'steps', { kind: 'slider', min: 1, max: 64, step: 1, known: 'Unreal: Sub Steps · Houdini: Substeps · Blender: Quality Steps · Unity: Solver Frequency', also: 'Substeps, Sub Steps, Quality, Solver Frequency, Iterations', help: 'Solver steps a frame. More: stiffer things hold their stiffness and less is lost, and it takes that much more of the processor\'s time.' }),
   { cat: 'soft', kind: 'softinfo', label: 'What it is now', on: softs, also: 'Points, Stats' },
@@ -392,6 +395,38 @@ export const SETTINGS = [
 ];
 
 
+const OLD_PIN = { edge: 'Its top edge', two: '2 corners', four: '4 corners', middle: 'Its middle' };
+function pinsBlock(t, ctx) {
+  const vp = ctx.vp, at = t.soft.pinAt || [], old = SV(t, 'pin') !== 'none' ? SV(t, 'pin') : null;
+  const changed = () => { ctx.commit(); ctx.repaint(); };
+  const n = at.length + (old ? 1 : 0);
+  const pin = button('', () => { vp.pinTool = !vp.pinTool; ctx.repaint(); },
+    { title: vp.pinTool ? 'Stop placing pins (Esc)' : 'Then click on it to place a pin; click a pin\'s head to take it off' });
+  pin.append(icon('pin', 14), el('span', {}, vp.pinTool ? 'Done' : 'Pin'));
+  pin.classList.add('small');
+  pin.classList.toggle('on', !!vp.pinTool);
+  const parts = [el('div', { class: 'row pins-head' }, el('label', {}, 'Pins'), el('span', { class: 'note' }, n ? `${n} ${n === 1 ? 'pin' : 'pins'}` : 'No pins yet'), pin)];
+  if (vp.pinTool) parts.push(el('p', { class: 'note pinhint' }, 'Click on it to place a pin; click a pin\'s head to take it off. Esc or Done when you have finished.'));
+  const off = (title, run) => { const b = button('', run, { title, 'aria-label': title }); b.classList.add('small'); b.append(icon('trash', 14)); return b; };
+  if (old) parts.push(el('div', { class: 'row pin' }, el('label', {}, OLD_PIN[old] || old), el('span', { class: 'where', title: 'Chosen in the Pinned row before 0.59' }, 'from before'), el('span'),
+    off('Let go of it', () => { t.soft.pin = 'none'; changed(); })));
+  const places = pinPlaces(vp, t);
+  for (const p of places.length ? places : at.map((q, k) => ({ k, n: k + 1, q, hold: q.length < 4 || q[3] !== 0 }))) {
+    const input = el('input', { type: 'checkbox', role: 'switch', 'aria-label': `Pin ${p.n} holds` });
+    input.checked = p.hold;
+    input.addEventListener('change', () => { setHold(t, p.k, input.checked); changed(); });
+    const r = el('div', { class: 'row pin' + (p.hold ? '' : ' off'), title: p.hold ? 'Holding. Point here to light its pin in the view.' : 'Not holding: switch it on to hold again.' },
+      el('label', {}, `Pin ${p.n}`), el('span', { class: 'where' }, whereWords(p.q, t)),
+      el('label', { class: 'hold', title: 'Holds' }, input, el('span', { class: 'knob' })),
+      off(`Take Pin ${p.n} off`, () => { removePin(t, p.k); vp.pinHot = null; changed(); }));
+    r.addEventListener('pointerenter', () => { vp.pinHot = { id: t.id, k: p.k }; });
+    r.addEventListener('pointerleave', () => { if (vp.pinHot && vp.pinHot.k === p.k) vp.pinHot = null; });
+    parts.push(r);
+  }
+  if (n) parts.push(el('div', { class: 'btns' }, button('Take all pins off', () => { t.soft.pinAt = null; t.soft.pin = 'none'; vp.pinHot = null; changed(); })));
+  return parts;
+}
+
 function rowFor(p, things, ctx) {
   const vp = ctx.vp;
   const ts = [...new Set(things.flatMap(it => p.on(it, vp)))];
@@ -511,6 +546,20 @@ function rowFor(p, things, ctx) {
     case 'swatches': row = el('div', { class: 'stackrow', title: help }, el('label', {}, p.label), swatches({ commit, items: SWATCHES.map(s => ({ label: s.label, color: s.color, clear: s.finish === 'glass' || s.finish === 'frosted',
       apply: () => { for (const t of ts) { t.color = hexToRgb(s.color); t.finish = s.finish; delete t.pbr; } ctx.repaint(); ctx.paintList(); } })) })); break;
     case 'action': row = el('div', { class: 'btns' }, button(p.label, () => { for (const t of live()) p.run(t, ctx); ctx.repaint(); if (!p.noCommit) commit(); }, { title: p.title })); break;
+    case 'pins': {
+      if (ts.length > 1) { row = el('p', { class: 'note' }, 'Select one soft thing to see its pins.'); break; }
+      const t = ts[0];
+      let sig = '';
+      row = el('div', { class: 'pins', title: help });
+      row.paint = () => {
+        const now = JSON.stringify([t.soft.pinAt || null, SV(t, 'pin'), !!vp.pinTool]);
+        if (now === sig) return;
+        sig = now;
+        row.replaceChildren(...pinsBlock(t, ctx));
+      };
+      row.paint();
+      break;
+    }
     case 'softinfo': {
       const text = el('p', { class: 'note' });
       row = text;

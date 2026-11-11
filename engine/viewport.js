@@ -13,6 +13,7 @@ import { toUnitSpace, interleave } from './importers.js';
 import { Physics, eulerOf, blocksFluid, setGravity } from './physics.js';
 import { Gizmo, project } from './gizmo.js';
 import { drawMarkers, kindShown } from './markers.js';
+import { drawPins, pinAtScreen, removePin } from './pins.js';
 import { ASSET_BY_ID, assetModel, assetModelId } from './assets.js';
 import { drawMarks, pickMark, MARK_TYPES, motionOn } from './marks.js';
 import { drawBox, drawLanding, drawReach, hitBoxHandle, beginBoxDrag, moveBoxDrag } from './boxhandles.js';
@@ -78,6 +79,9 @@ export class Viewport {
     this.playing = true;
     this.display = { box: true, sources: true, takers: true, parts: true, smoke: true, liquid: true, marks: true };
     this.markerStyle = 'badge';
+    this.pinStyle = 'pushpin';
+    this.pinHot = null;
+    this.pinRows = [];
     this.mouseIn = false;
     this.clean = false;
     this.markerSize = { k: 0.2, min: 0.018 };    this.simFrames = 0;
@@ -503,6 +507,7 @@ export class Viewport {
     if (kept.length === list.length) kept.push(at);
     s.pinAt = kept.length ? kept : null;
     s.preset = s.preset || 'custom';
+    this.emit('change');
   }
 
   applyMotion(t) {
@@ -1223,6 +1228,7 @@ export class Viewport {
     if (this.clean) {
       if (this.display.marks) drawMarks(ctx, this, W, H, this.markHits); else this.markHits.clear();
       this.markerRows = [];
+      this.pinRows = [];
       return;
     }
     const dr = this.drag && this.drag.mode === 'box' ? this.drag : null;
@@ -1237,6 +1243,7 @@ export class Viewport {
     if (this.display.marks) drawMarks(ctx, this, W, H, this.markHits);
     else this.markHits.clear();
     this.markerRows = this.markerStyle === 'badge' ? drawMarkers(ctx, this, W, H) : [];
+    this.pinRows = this.pinStyle === 'pushpin' ? drawPins(ctx, this, W, H) : [];
     const it = this.gizmoTarget();
     if (it) this.gizmo.draw(ctx, it, this.camera, W, H, this.mouseAt);
     this.drawDecalHandles(ctx, W, H);
@@ -1344,6 +1351,8 @@ export class Viewport {
       }
     }
     if (this.pinTool && e.button === 0 && !e.shiftKey) {
+      const ph = pinAtScreen(this, m.cx, m.cy), po = ph && this.scene.objects.find(o => o.id === ph.id);
+      if (po) { removePin(po, ph.k); this.pinHot = null; this.emit('commit'); this.emit('change'); this.drag = null; return; }
       const ray = this.camera.ray(m.x, m.y), hit = this.scene.pick(ray, { emitters: false }), b = hit && hit.item && softOn(hit.item) ? this.soft.bodies.get(hit.item.id) : null;
       const h = b ? b.rayHit(ray.origin, ray.dir) : null;
       if (h) { this.select(hit.item); this.togglePinAt(hit.item, b, h.local); this.emit('commit'); this.drag = null; return; }
@@ -1429,7 +1438,8 @@ export class Viewport {
       this.gizmo.hover = tgt ? this.gizmo.hit(tgt, this.camera, m.w, m.h, m.cx, m.cy) : null;
       this.boxHover = !this.gizmo.hover && this.boxHandles && !this.previewRegion ? hitBoxHandle(this.region, this.camera, m.w, m.h, m.cx, m.cy) : null;
       const onDecal = this.decalEdit ? this.decalHit(m.cx, m.cy, m.w, m.h) : null;
-      this.canvas.style.cursor = onDecal === 'move' ? 'move' : onDecal === 'size' ? 'nwse-resize' : onDecal === 'turn' ? 'grab' : this.gizmo.hover || this.boxHover ? 'pointer' : '';
+      const pinning = this.pinTool ? (pinAtScreen(this, m.cx, m.cy) ? 'pointer' : 'crosshair') : '';
+      this.canvas.style.cursor = pinning || (onDecal === 'move' ? 'move' : onDecal === 'size' ? 'nwse-resize' : onDecal === 'turn' ? 'grab' : this.gizmo.hover || this.boxHover ? 'pointer' : '');
       return;
     }
     const dr = this.drag;
